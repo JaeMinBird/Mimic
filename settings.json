@@ -1,0 +1,26 @@
+{
+    "_comment": "RAG Essay Writer Default Settings",
+    "_comment2": "Edit these values to change defaults. Session changes don't save here.",
+    
+    "retrieval": {
+        "chunks": 8,
+        "mmr_enabled": true,
+        "mmr_lambda": 0.7,
+        "deduplicate": true,
+        "dedup_threshold": 0.85,
+        "use_research": true
+    },
+    
+    "web_search": {
+        "num_results": 5
+    },
+    
+    "enhancement": {
+        "auto_refine": false
+    },
+    
+    "structure": {
+        "budget": 20000
+    }
+}
+

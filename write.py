@@ -2,6 +2,7 @@
 """RAG-powered essay writer using Claude with editing and advanced retrieval."""
 
 import os
+import json
 import pickle
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
@@ -24,6 +25,54 @@ except ImportError:
     WEB_SUPPORT = False
 
 
+def load_settings() -> Dict:
+    """Load settings from settings.json, creating default if not exists."""
+    settings_path = Path("settings.json")
+    
+    default_settings = {
+        "retrieval": {
+            "chunks": 8,
+            "mmr_enabled": True,
+            "mmr_lambda": 0.7,
+            "deduplicate": True,
+            "dedup_threshold": 0.85,
+            "use_research": True
+        },
+        "web_search": {
+            "num_results": 5
+        },
+        "enhancement": {
+            "auto_refine": False
+        },
+        "structure": {
+            "budget": 20000
+        }
+    }
+    
+    if settings_path.exists():
+        try:
+            with open(settings_path, 'r') as f:
+                loaded = json.load(f)
+                # Merge with defaults (in case new settings were added)
+                for category, values in default_settings.items():
+                    if category not in loaded:
+                        loaded[category] = values
+                    elif isinstance(values, dict):
+                        for key, val in values.items():
+                            if key not in loaded[category]:
+                                loaded[category][key] = val
+                return loaded
+        except (json.JSONDecodeError, KeyError) as e:
+            print(f"Warning: Could not parse settings.json ({e}), using defaults")
+            return default_settings
+    else:
+        # Create default settings file
+        with open(settings_path, 'w') as f:
+            json.dump(default_settings, f, indent=4)
+        print("Created settings.json with default values")
+        return default_settings
+
+
 class RAGWriter:
     """RAG system for generating essays in the style of source material."""
 
@@ -37,14 +86,19 @@ class RAGWriter:
         self.client = None
         self.embeddings = None  # Store embeddings for MMR
 
-        # Session state
-        self.top_k = 8  # Default number of chunks to retrieve
-        self.use_mmr = True  # Use MMR by default for diversity
-        self.mmr_lambda = 0.7  # Balance between relevance and diversity
-        self.use_research = True  # Whether to retrieve indexed research
-        self.auto_refine = False  # Whether to auto-critique and refine essays
-        self.deduplicate = True  # Whether to deduplicate retrieved chunks
-        self.dedup_threshold = 0.85  # Similarity threshold for deduplication
+        # Load settings from settings.json
+        settings = load_settings()
+        
+        # Session state (initialized from settings file)
+        self.top_k = settings['retrieval']['chunks']
+        self.use_mmr = settings['retrieval']['mmr_enabled']
+        self.mmr_lambda = settings['retrieval']['mmr_lambda']
+        self.use_research = settings['retrieval']['use_research']
+        self.auto_refine = settings['enhancement']['auto_refine']
+        self.deduplicate = settings['retrieval']['deduplicate']
+        self.dedup_threshold = settings['retrieval']['dedup_threshold']
+        self.web_results = settings['web_search']['num_results']
+        self.structure_budget = settings['structure']['budget']
         self.last_prompt = None
         self.last_context = None  # User-provided context for last essay
         self.last_essay = None
@@ -64,7 +118,6 @@ class RAGWriter:
 
         # Structure sources (for essay organization, not voice)
         self.structure_sources = []  # List of {'name': str, 'content': str}
-        self.structure_budget = 20000  # Max chars for structure sources
 
         self._load_index()
         self._load_claude()
@@ -685,11 +738,12 @@ Be extremely specific. Instead of "uses vivid language," say "frequently uses un
         print("Style profile created.\n")
         return self.style_profile
 
-    def web_search(self, query: str, num_results: int = 5) -> Optional[str]:
+    def web_search(self, query: str, num_results: Optional[int] = None) -> Optional[str]:
         """Search the web for current information on a topic.
         
         Uses DuckDuckGo HTML search (no API key required).
         """
+        num_results = num_results or self.web_results
         if not WEB_SUPPORT:
             print("Web search requires 'requests' package: pip install requests")
             return None
@@ -1122,6 +1176,7 @@ STYLE ENHANCEMENT:
   auto-refine       Toggle automatic Opus refinement (current: {})
 
 WEB RESEARCH:
+  web-results <N>   Set number of web results (current: {}, 1-20)
   web               Show last web search results
   clear-web         Clear web search context
 
@@ -1174,6 +1229,7 @@ UTILITIES:
   quit, exit, q     Exit the program
 """.format(
             'on' if self.auto_refine else 'off',
+            self.web_results,
             self.structure_budget, 
             self.top_k, 
             'on' if self.use_mmr else 'off', 
@@ -1324,6 +1380,20 @@ UTILITIES:
                         status = 'on' if self.deduplicate else 'off'
                         print(f"Deduplication is currently: {status}")
                         print("Usage: dedup on/off\n")
+                    continue
+
+                # Set web search results count
+                if cmd == 'web-results':
+                    try:
+                        n = int(args)
+                        if n < 1 or n > 20:
+                            print("Please provide a number between 1 and 20.\n")
+                            continue
+                        self.web_results = n
+                        print(f"Web search will now return {n} results.\n")
+                    except ValueError:
+                        print(f"Web results is currently: {self.web_results}")
+                        print("Usage: web-results <N> (1-20)\n")
                     continue
 
                 # Toggle auto-refine
@@ -1770,6 +1840,8 @@ UTILITIES:
                     print(f"\nStyle Enhancement:")
                     print(f"  Style profile: {'active' if self.style_profile else 'none'}")
                     print(f"  Auto-refine (Opus): {'on' if self.auto_refine else 'off'}")
+                    print(f"\nWeb Search:")
+                    print(f"  Results per search: {self.web_results}")
                     print(f"  Web context: {'active' if self.web_context else 'none'}")
                     print(f"\nIndexed Sources:")
                     print(f"  Style chunks (transcripts): {style_count}")

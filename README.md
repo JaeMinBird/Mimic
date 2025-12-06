@@ -143,12 +143,18 @@ Generating essay with Claude Sonnet 4.5...
 | `exclude <file>` | Exclude a source from retrieval |
 | `include <file>` | Re-include an excluded source |
 
+### Web Search
+
+| Command | Description |
+|---------|-------------|
+| `web-results <N>` | Set number of search results (1-20, default: 5) |
+| `web` | Show last web search results |
+| `clear-web` | Clear web search context |
+
 ### Other
 
 | Command | Description |
 |---------|-------------|
-| `web` | Show last web search results |
-| `clear-web` | Clear web search context |
 | `settings` | Show current settings |
 | `history` | Show essay history |
 | `last` | Display the last essay |
@@ -237,6 +243,7 @@ Loaded structure source: example_essay.pdf (12 pages)
 moose-rag/
 ├── write.py            # Main essay writer (interactive mode)
 ├── build_index.py      # Index builder script
+├── settings.json       # Default settings (edit to change defaults)
 ├── requirements.txt    # Python dependencies
 ├── .env                # API key (create this)
 ├── transcripts/        # Style sources (.txt)
@@ -248,6 +255,48 @@ moose-rag/
     ├── embeddings.npy
     └── config.pkl
 ```
+
+## Settings File
+
+The `settings.json` file controls default values for all settings. Edit this file to change what the program loads on startup:
+
+```json
+{
+    "retrieval": {
+        "chunks": 8,
+        "mmr_enabled": true,
+        "mmr_lambda": 0.7,
+        "deduplicate": true,
+        "dedup_threshold": 0.85,
+        "use_research": true
+    },
+    "web_search": {
+        "num_results": 5
+    },
+    "enhancement": {
+        "auto_refine": false
+    },
+    "structure": {
+        "budget": 20000
+    }
+}
+```
+
+**Settings explained:**
+
+| Setting | Description |
+|---------|-------------|
+| `chunks` | Number of chunks to retrieve per source type |
+| `mmr_enabled` | Whether to use MMR diversity retrieval |
+| `mmr_lambda` | Balance: 1.0 = pure relevance, 0.0 = pure diversity |
+| `deduplicate` | Remove near-duplicate chunks |
+| `dedup_threshold` | Similarity threshold for deduplication (0.0-1.0) |
+| `use_research` | Whether to include indexed research PDFs |
+| `num_results` | Number of web search results to retrieve |
+| `auto_refine` | Automatically refine essays with Opus |
+| `budget` | Max characters for structure source sampling |
+
+**Note:** Changes made during a session (e.g., `chunks 20`) do not modify `settings.json`. On the next startup, the program reloads from the file.
 
 ## Tips
 
