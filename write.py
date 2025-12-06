@@ -43,10 +43,10 @@ class RAGWriter:
         self.mmr_lambda = 0.7  # Balance between relevance and diversity
         self.use_research = True  # Whether to retrieve indexed research
         self.auto_refine = False  # Whether to auto-critique and refine essays
-        self.auto_web = False  # Whether to auto-search web for each prompt
         self.deduplicate = True  # Whether to deduplicate retrieved chunks
         self.dedup_threshold = 0.85  # Similarity threshold for deduplication
         self.last_prompt = None
+        self.last_context = None  # User-provided context for last essay
         self.last_essay = None
         self.last_sources = None
         self.last_research_sources = None
@@ -851,16 +851,13 @@ Rewrite the essay incorporating ALL the critique's suggestions. The goal is perf
 
     def generate_essay(self, prompt: str, top_k: Optional[int] = None,
                        max_tokens: int = 4000, revision_feedback: Optional[str] = None,
-                       previous_essay: Optional[str] = None) -> Tuple[str, List[Dict], List[Dict]]:
+                       previous_essay: Optional[str] = None,
+                       user_context: Optional[str] = None) -> Tuple[str, List[Dict], List[Dict]]:
         """Generate an essay using retrieved context.
 
         Returns tuple of (essay_text, style_sources_used, research_sources_used)
         """
         k = top_k or self.top_k
-
-        # Auto web search if enabled (skip for revisions)
-        if self.auto_web and not revision_feedback:
-            self.web_search(prompt)
 
         # Retrieve more chunks if deduplication is enabled
         retrieve_k = k * 2 if self.deduplicate else k
@@ -1000,15 +997,17 @@ Please revise the essay according to the feedback while maintaining the style fr
             structure_instruction = " Follow the organizational patterns from STRUCTURE SOURCES." if structure_context else ""
             research_instruction = " Incorporate facts from RESEARCH SOURCES." if research_context else ""
             web_instruction = " Include relevant current information from WEB RESEARCH." if self.web_context else ""
+            context_section = f"\n\nCONTEXT (important background for this essay):\n{user_context}" if user_context else ""
+            context_instruction = " Consider the provided CONTEXT when framing your essay." if user_context else ""
 
             user_message = f"""Based on the following materials, write an essay on this topic:
 
-TOPIC: {prompt}
+TOPIC: {prompt}{context_section}
 
 STYLE SOURCES (mimic this writing voice and tone):
 {style_context}{style_profile_section}{structure_section}{research_section}{web_section}
 
-Write a complete essay that captures the voice and tone from STYLE SOURCES.{structure_instruction}{research_instruction}{web_instruction}"""
+Write a complete essay that captures the voice and tone from STYLE SOURCES.{structure_instruction}{research_instruction}{web_instruction}{context_instruction}"""
             print("Generating essay with Claude Sonnet 4.5...\n")
 
         # Call Claude API
@@ -1041,6 +1040,44 @@ Write a complete essay that captures the voice and tone from STYLE SOURCES.{stru
 
         return results
 
+    def parse_write_command(self) -> Optional[Dict[str, str]]:
+        """Parse the structured write command input.
+        
+        Prompts user for Prompt, Context, and Search fields.
+        Returns dict with 'prompt', 'context', 'search' keys, or None if cancelled.
+        """
+        print("\n--- Write Essay ---")
+        print("(Enter each field, or leave blank to skip. Type 'cancel' to abort.)\n")
+        
+        # Get prompt (required)
+        prompt = input("Prompt: ").strip()
+        if prompt.lower() == 'cancel':
+            print("Cancelled.\n")
+            return None
+        if not prompt:
+            print("Prompt is required. Cancelled.\n")
+            return None
+        
+        # Get context (optional)
+        context = input("Context: ").strip()
+        if context.lower() == 'cancel':
+            print("Cancelled.\n")
+            return None
+        
+        # Get search query (optional)
+        search = input("Search: ").strip()
+        if search.lower() == 'cancel':
+            print("Cancelled.\n")
+            return None
+        
+        print()  # Blank line before generation starts
+        
+        return {
+            'prompt': prompt,
+            'context': context if context else None,
+            'search': search if search else None
+        }
+
     def get_all_sources(self) -> List[str]:
         """Get list of all unique source files."""
         sources = set()
@@ -1066,8 +1103,8 @@ Write a complete essay that captures the voice and tone from STYLE SOURCES.{stru
         print("=" * 60)
         print("""
 ESSAY GENERATION:
-  <topic>           Write an essay on <topic>
-  regenerate, r     Regenerate the last essay with same prompt
+  write             Start structured essay wizard (Prompt/Context/Search)
+  regenerate, r     Regenerate the last essay with same settings
 
 EDITING:
   edit <feedback>   Revise the last essay with your feedback
@@ -1085,8 +1122,6 @@ STYLE ENHANCEMENT:
   auto-refine       Toggle automatic Opus refinement (current: {})
 
 WEB RESEARCH:
-  search <query>    Search the web for current information
-  auto-web on/off   Auto-search web for each essay topic (current: {})
   web               Show last web search results
   clear-web         Clear web search context
 
@@ -1139,7 +1174,6 @@ UTILITIES:
   quit, exit, q     Exit the program
 """.format(
             'on' if self.auto_refine else 'off',
-            'on' if self.auto_web else 'off',
             self.structure_budget, 
             self.top_k, 
             'on' if self.use_mmr else 'off', 
@@ -1156,10 +1190,10 @@ UTILITIES:
         print("=" * 60)
         print("RAG Essay Writer - Interactive Mode")
         print("=" * 60)
-        print("\nType 'help' for all commands, or just enter your essay topic.")
+        print("\nType 'write' to start an essay, or 'help' for all commands.")
         print(f"Index: {style_count} style chunks, {research_count} research chunks")
         print(f"Retrieval: {self.top_k} chunks, MMR {'on' if self.use_mmr else 'off'}, dedup {'on' if self.deduplicate else 'off'}")
-        print(f"Enhancement: auto-refine {'on' if self.auto_refine else 'off'}, auto-web {'on' if self.auto_web else 'off'}, profile {'active' if self.style_profile else 'none'}")
+        print(f"Enhancement: auto-refine {'on' if self.auto_refine else 'off'}, profile {'active' if self.style_profile else 'none'}")
         if self.excluded_sources:
             print(f"Excluded sources: {len(self.excluded_sources)}")
         print()
@@ -1186,13 +1220,28 @@ UTILITIES:
                     self.print_help()
                     continue
 
+                # Write command - structured essay generation
+                if cmd == 'write':
+                    write_params = self.parse_write_command()
+                    if write_params:
+                        # Perform web search if requested
+                        if write_params['search']:
+                            self.web_search(write_params['search'])
+                        
+                        # Generate the essay
+                        self._generate_and_display(
+                            write_params['prompt'],
+                            user_context=write_params['context']
+                        )
+                    continue
+
                 # Regenerate
                 if cmd in ['regenerate', 'r']:
                     if not self.last_prompt:
-                        print("No previous essay to regenerate. Generate one first.\n")
+                        print("No previous essay to regenerate. Use 'write' first.\n")
                         continue
                     print(f"Regenerating essay on: {self.last_prompt}\n")
-                    self._generate_and_display(self.last_prompt)
+                    self._generate_and_display(self.last_prompt, user_context=self.last_context)
                     continue
 
                 # Edit/revise
@@ -1413,36 +1462,12 @@ UTILITIES:
                     print(f"Deleted profile: {profile_name}\n")
                     continue
 
-                # Toggle auto-web
-                if cmd == 'auto-web':
-                    if args.lower() == 'on':
-                        self.auto_web = True
-                        print("Auto-web enabled (will search web for each essay topic).\n")
-                    elif args.lower() == 'off':
-                        self.auto_web = False
-                        print("Auto-web disabled.\n")
-                    else:
-                        status = 'on' if self.auto_web else 'off'
-                        print(f"Auto-web is currently: {status}")
-                        print("Usage: auto-web on/off\n")
-                    continue
-
-                # Web search
-                if cmd == 'search':
-                    if not args:
-                        print("Please provide a search query. Example: search latest AI developments 2024\n")
-                        continue
-                    self.web_search(args)
-                    if self.web_context:
-                        print("Web context will be included in next generation.\n")
-                    continue
-
                 # Show web context
                 if cmd == 'web':
                     if self.web_context:
                         print("\n" + self.web_context + "\n")
                     else:
-                        print("No web search results. Use 'search <query>' to search.\n")
+                        print("No web search results. Use 'write' and enter a Search query.\n")
                     continue
 
                 # Clear web context
@@ -1745,7 +1770,6 @@ UTILITIES:
                     print(f"\nStyle Enhancement:")
                     print(f"  Style profile: {'active' if self.style_profile else 'none'}")
                     print(f"  Auto-refine (Opus): {'on' if self.auto_refine else 'off'}")
-                    print(f"  Auto-web search: {'on' if self.auto_web else 'off'}")
                     print(f"  Web context: {'active' if self.web_context else 'none'}")
                     print(f"\nIndexed Sources:")
                     print(f"  Style chunks (transcripts): {style_count}")
@@ -1758,9 +1782,9 @@ UTILITIES:
                     print()
                     continue
 
-                # Otherwise, treat as essay prompt
-                print()
-                self._generate_and_display(user_input)
+                # Unknown command
+                print(f"Unknown command: {cmd}")
+                print("Use 'write' to start an essay, or 'help' for all commands.\n")
 
             except KeyboardInterrupt:
                 print("\n\nGoodbye!")
@@ -1769,18 +1793,21 @@ UTILITIES:
                 print(f"\nError: {e}\n")
 
     def _generate_and_display(self, prompt: str, revision_feedback: Optional[str] = None,
-                              previous_essay: Optional[str] = None):
+                              previous_essay: Optional[str] = None,
+                              user_context: Optional[str] = None):
         """Generate essay and display with options."""
         import datetime
 
         essay, style_sources, research_sources = self.generate_essay(
             prompt,
             revision_feedback=revision_feedback,
-            previous_essay=previous_essay
+            previous_essay=previous_essay,
+            user_context=user_context
         )
 
         # Update state
         self.last_prompt = prompt
+        self.last_context = user_context
         self.last_essay = essay
         self.last_sources = style_sources
         self.last_research_sources = research_sources
