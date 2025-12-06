@@ -1077,7 +1077,11 @@ EDITING:
 STYLE ENHANCEMENT:
   analyze           Analyze style sources and create style profile
   profile           Show current style profile
-  clear-profile     Clear the style profile
+  save-profile <n>  Save current profile to profiles/<n>.txt
+  load-profile <n>  Load a saved profile
+  profiles          List all saved profiles
+  delete-profile    Delete a saved profile
+  clear-profile     Clear the active style profile
   auto-refine       Toggle automatic Opus refinement (current: {})
 
 WEB RESEARCH:
@@ -1329,13 +1333,84 @@ UTILITIES:
                         print(self.style_profile)
                         print("=" * 60 + "\n")
                     else:
-                        print("No style profile created yet. Use 'analyze' to create one.\n")
+                        print("No style profile active. Use 'analyze' to create one or 'load-profile <name>' to load a saved one.\n")
                     continue
 
                 # Clear style profile
                 if cmd == 'clear-profile':
                     self.style_profile = None
                     print("Style profile cleared.\n")
+                    continue
+
+                # Save style profile
+                if cmd == 'save-profile':
+                    if not self.style_profile:
+                        print("No style profile to save. Use 'analyze' first.\n")
+                        continue
+                    if not args:
+                        print("Please provide a name. Example: save-profile my_style\n")
+                        continue
+                    # Create profiles directory if needed
+                    profiles_dir = Path("profiles")
+                    profiles_dir.mkdir(exist_ok=True)
+                    # Save profile
+                    profile_name = args.strip().replace(" ", "_")
+                    profile_path = profiles_dir / f"{profile_name}.txt"
+                    with open(profile_path, 'w', encoding='utf-8') as f:
+                        f.write(self.style_profile)
+                    print(f"Style profile saved to: {profile_path}\n")
+                    continue
+
+                # Load style profile
+                if cmd == 'load-profile':
+                    if not args:
+                        print("Please provide a profile name. Example: load-profile my_style")
+                        print("Use 'profiles' to list saved profiles.\n")
+                        continue
+                    profile_name = args.strip().replace(" ", "_")
+                    profile_path = Path("profiles") / f"{profile_name}.txt"
+                    if not profile_path.exists():
+                        # Try without .txt extension in case they included it
+                        if args.strip().endswith('.txt'):
+                            profile_path = Path("profiles") / args.strip()
+                        if not profile_path.exists():
+                            print(f"Profile not found: {profile_name}")
+                            print("Use 'profiles' to list saved profiles.\n")
+                            continue
+                    with open(profile_path, 'r', encoding='utf-8') as f:
+                        self.style_profile = f.read()
+                    print(f"Loaded style profile: {profile_name}\n")
+                    continue
+
+                # List saved profiles
+                if cmd == 'profiles':
+                    profiles_dir = Path("profiles")
+                    if not profiles_dir.exists():
+                        print("No saved profiles yet. Use 'save-profile <name>' after running 'analyze'.\n")
+                        continue
+                    profiles = list(profiles_dir.glob("*.txt"))
+                    if not profiles:
+                        print("No saved profiles yet. Use 'save-profile <name>' after running 'analyze'.\n")
+                        continue
+                    print(f"\nSaved style profiles ({len(profiles)}):\n")
+                    for p in sorted(profiles):
+                        size = p.stat().st_size
+                        print(f"  - {p.stem} ({size:,} bytes)")
+                    print()
+                    continue
+
+                # Delete a saved profile
+                if cmd == 'delete-profile':
+                    if not args:
+                        print("Please provide a profile name. Example: delete-profile my_style\n")
+                        continue
+                    profile_name = args.strip().replace(" ", "_")
+                    profile_path = Path("profiles") / f"{profile_name}.txt"
+                    if not profile_path.exists():
+                        print(f"Profile not found: {profile_name}\n")
+                        continue
+                    profile_path.unlink()
+                    print(f"Deleted profile: {profile_name}\n")
                     continue
 
                 # Toggle auto-web

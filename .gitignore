@@ -9,5 +9,6 @@ venv/
 research/*
 structure/*
 transcripts/*
+profiles/*
 .claude/
 tests/
