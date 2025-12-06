@@ -2,7 +2,6 @@
 """RAG-powered essay writer using Claude with editing and advanced retrieval."""
 
 import os
-import json
 import pickle
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
@@ -18,71 +17,6 @@ try:
 except ImportError:
     PDF_SUPPORT = False
 
-try:
-    import requests
-    WEB_SUPPORT = True
-except ImportError:
-    WEB_SUPPORT = False
-
-
-def load_settings() -> Dict:
-    """Load settings from settings.json, creating default if not exists."""
-    settings_path = Path("settings.json")
-    
-    default_settings = {
-        "retrieval": {
-            "chunks": 8,
-            "mmr_enabled": True,
-            "mmr_lambda": 0.7,
-            "deduplicate": True,
-            "dedup_threshold": 0.85,
-            "use_research": True
-        },
-        "web_search": {
-            "num_results": 5
-        },
-        "enhancement": {
-            "auto_refine": False
-        },
-        "structure": {
-            "budget": 20000
-        },
-        "writing_rules": {
-            "enabled": True,
-            "rules": [
-                "NEVER use em-dashes (—). Use commas, periods, or parentheses instead.",
-                "AVOID overused words: crucial, pivotal, landscape, navigate, delve, foster, realm, embark, journey.",
-                "AVOID hedging phrases like 'It's important to note that' or 'Needless to say'.",
-                "NEVER end with generic conclusions or 'only time will tell'.",
-                "VARY sentence length naturally.",
-                "NEVER use 'In conclusion' or 'To summarize' to start final paragraphs."
-            ]
-        }
-    }
-    
-    if settings_path.exists():
-        try:
-            with open(settings_path, 'r') as f:
-                loaded = json.load(f)
-                # Merge with defaults (in case new settings were added)
-                for category, values in default_settings.items():
-                    if category not in loaded:
-                        loaded[category] = values
-                    elif isinstance(values, dict):
-                        for key, val in values.items():
-                            if key not in loaded[category]:
-                                loaded[category][key] = val
-                return loaded
-        except (json.JSONDecodeError, KeyError) as e:
-            print(f"Warning: Could not parse settings.json ({e}), using defaults")
-            return default_settings
-    else:
-        # Create default settings file
-        with open(settings_path, 'w') as f:
-            json.dump(default_settings, f, indent=4)
-        print("Created settings.json with default values")
-        return default_settings
-
 
 class RAGWriter:
     """RAG system for generating essays in the style of source material."""
@@ -97,43 +31,24 @@ class RAGWriter:
         self.client = None
         self.embeddings = None  # Store embeddings for MMR
 
-        # Load settings from settings.json
-        settings = load_settings()
-        
-        # Session state (initialized from settings file)
-        self.top_k = settings['retrieval']['chunks']
-        self.use_mmr = settings['retrieval']['mmr_enabled']
-        self.mmr_lambda = settings['retrieval']['mmr_lambda']
-        self.use_research = settings['retrieval']['use_research']
-        self.auto_refine = settings['enhancement']['auto_refine']
-        self.deduplicate = settings['retrieval']['deduplicate']
-        self.dedup_threshold = settings['retrieval']['dedup_threshold']
-        self.web_results = settings['web_search']['num_results']
-        self.structure_budget = settings['structure']['budget']
-        
-        # Writing rules (anti-AI-detection guidelines)
-        writing_rules_config = settings.get('writing_rules', {'enabled': False, 'rules': []})
-        self.writing_rules_enabled = writing_rules_config.get('enabled', False)
-        self.writing_rules = writing_rules_config.get('rules', [])
+        # Session state
+        self.top_k = 8  # Default number of chunks to retrieve
+        self.use_mmr = True  # Use MMR by default for diversity
+        self.mmr_lambda = 0.7  # Balance between relevance and diversity
+        self.use_research = True  # Whether to retrieve indexed research
         self.last_prompt = None
-        self.last_context = None  # User-provided context for last essay
         self.last_essay = None
         self.last_sources = None
         self.last_research_sources = None
         self.essay_history = []  # Track all essays in session
         self.excluded_sources = set()  # Sources to exclude from retrieval
 
-        # Style analysis
-        self.style_profile = None  # Analyzed style characteristics
-
-        # Web research
-        self.web_context = None  # Last web search results
-
         # Research sources (PDFs for information, not style)
         self.research_sources = []  # List of {'name': str, 'content': str}
 
         # Structure sources (for essay organization, not voice)
         self.structure_sources = []  # List of {'name': str, 'content': str}
+        self.structure_budget = 20000  # Max chars for structure sources
 
         self._load_index()
         self._load_claude()
@@ -604,357 +519,30 @@ class RAGWriter:
 
         return results
 
-    def deduplicate_chunks(self, chunks: List[Dict], threshold: float = 0.85) -> List[Dict]:
-        """Remove near-duplicate chunks based on embedding similarity.
-        
-        Keeps the first (most relevant) chunk when duplicates are found.
-        """
-        if not chunks or self.embeddings is None:
-            return chunks
-
-        # Get indices for the chunks
-        chunk_indices = []
-        for chunk in chunks:
-            # Find the index in metadata
-            for i, meta in enumerate(self.metadata):
-                if (meta['filename'] == chunk['filename'] and 
-                    meta['chunk_index'] == chunk['chunk_index']):
-                    chunk_indices.append(i)
-                    break
-
-        if len(chunk_indices) != len(chunks):
-            return chunks  # Fallback if we can't find indices
-
-        # Check similarity between chunks
-        deduplicated = [chunks[0]]
-        kept_indices = [chunk_indices[0]]
-
-        for i in range(1, len(chunks)):
-            chunk_embedding = self.embeddings[chunk_indices[i]]
-            is_duplicate = False
-
-            for kept_idx in kept_indices:
-                kept_embedding = self.embeddings[kept_idx]
-                similarity = self._cosine_similarity(chunk_embedding, kept_embedding)
-
-                if similarity > threshold:
-                    is_duplicate = True
-                    break
-
-            if not is_duplicate:
-                deduplicated.append(chunks[i])
-                kept_indices.append(chunk_indices[i])
-
-        return deduplicated
-
-    def analyze_style(self, num_samples: int = 15) -> str:
-        """Analyze style sources and create a detailed style profile.
-        
-        Uses Claude to extract specific patterns from style sources.
-        """
-        print("Analyzing style sources...")
-
-        # Get style chunks directly from metadata (no semantic search)
-        # This ensures we actually get style sources regardless of query matching
-        style_chunks = [
-            {**meta, 'idx': i} 
-            for i, meta in enumerate(self.metadata) 
-            if meta.get('source_type') == 'style' and meta['filename'] not in self.excluded_sources
-        ]
-
-        if not style_chunks:
-            print("No style sources found to analyze.")
-            return None
-
-        # Group by filename to ensure diversity across sources
-        from collections import defaultdict
-        chunks_by_file = defaultdict(list)
-        for chunk in style_chunks:
-            chunks_by_file[chunk['filename']].append(chunk)
-
-        # Sample evenly from each source file
-        samples = []
-        files = list(chunks_by_file.keys())
-        samples_per_file = max(1, num_samples // len(files))
-        
-        import random
-        for filename in files:
-            file_chunks = chunks_by_file[filename]
-            # Take evenly spaced samples from each file
-            if len(file_chunks) <= samples_per_file:
-                samples.extend(file_chunks)
-            else:
-                step = len(file_chunks) // samples_per_file
-                indices = [i * step for i in range(samples_per_file)]
-                samples.extend([file_chunks[i] for i in indices])
-
-        # Limit total samples
-        if len(samples) > num_samples * 2:
-            samples = random.sample(samples, num_samples * 2)
-
-        print(f"Sampled {len(samples)} chunks from {len(files)} style sources.")
-
-        # Build sample text
-        sample_text = "\n\n---\n\n".join([
-            f"[From {s['filename']}]\n{s['text']}" for s in samples
-        ])
-
-        # Ask Claude to analyze the style
-        analysis_prompt = """Analyze these writing samples and extract a detailed style profile. Be specific and concrete.
-
-WRITING SAMPLES:
-{samples}
-
-Provide a comprehensive style analysis covering:
-
-1. SENTENCE STRUCTURE
-   - Average sentence length (short/medium/long)
-   - Sentence variety patterns
-   - Use of fragments or run-ons
-   - Punctuation habits (semicolons, dashes, parentheticals)
-
-2. VOCABULARY & DICTION
-   - Formality level (casual/conversational/formal/academic)
-   - Characteristic words or phrases
-   - Technical vs accessible language
-   - Any repeated expressions or verbal tics
-
-3. RHETORICAL TECHNIQUES
-   - Use of questions (rhetorical, direct)
-   - Analogies and metaphors style
-   - How arguments are structured
-   - Use of examples and evidence
-
-4. PARAGRAPH PATTERNS
-   - Typical paragraph length
-   - How paragraphs begin and end
-   - Transition patterns between ideas
-
-5. VOICE & TONE
-   - Overall persona (authoritative, humble, provocative, etc.)
-   - Relationship with reader (distant, conversational, challenging)
-   - Emotional register
-   - Any distinctive quirks
-
-6. SPECIFIC PATTERNS TO REPLICATE
-   - List 5-7 concrete, imitable patterns
-   - Include example phrases or structures
-
-Be extremely specific. Instead of "uses vivid language," say "frequently uses unexpected adjective-noun pairings like 'ambitious silence' or 'reluctant clarity'."
-""".format(samples=sample_text)
-
-        print("Extracting style patterns with Claude...")
-        message = self.client.messages.create(
-            model="claude-sonnet-4-5-20250929",
-            max_tokens=2000,
-            messages=[{"role": "user", "content": analysis_prompt}]
-        )
-
-        self.style_profile = message.content[0].text
-        print("Style profile created.\n")
-        return self.style_profile
-
-    def web_search(self, query: str, num_results: Optional[int] = None) -> Optional[str]:
-        """Search the web for current information on a topic.
-        
-        Uses DuckDuckGo HTML search (no API key required).
-        """
-        num_results = num_results or self.web_results
-        if not WEB_SUPPORT:
-            print("Web search requires 'requests' package: pip install requests")
-            return None
-
-        print(f"Searching web for: {query}")
-
-        try:
-            # Use DuckDuckGo HTML search
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            
-            # DuckDuckGo lite version for simpler parsing
-            url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
-            response = requests.get(url, headers=headers, timeout=10)
-            
-            if response.status_code != 200:
-                print(f"Search failed with status {response.status_code}")
-                return None
-
-            # Simple extraction of result snippets
-            from html.parser import HTMLParser
-            
-            class DDGParser(HTMLParser):
-                def __init__(self):
-                    super().__init__()
-                    self.results = []
-                    self.in_result = False
-                    self.in_snippet = False
-                    self.current_title = ""
-                    self.current_snippet = ""
-
-                def handle_starttag(self, tag, attrs):
-                    attrs_dict = dict(attrs)
-                    if tag == 'a' and attrs_dict.get('class') == 'result__a':
-                        self.in_result = True
-                    if tag == 'a' and attrs_dict.get('class') == 'result__snippet':
-                        self.in_snippet = True
-
-                def handle_endtag(self, tag):
-                    if tag == 'a' and self.in_result:
-                        self.in_result = False
-                    if tag == 'a' and self.in_snippet:
-                        self.in_snippet = False
-                        if self.current_title and self.current_snippet:
-                            self.results.append({
-                                'title': self.current_title.strip(),
-                                'snippet': self.current_snippet.strip()
-                            })
-                        self.current_title = ""
-                        self.current_snippet = ""
-
-                def handle_data(self, data):
-                    if self.in_result:
-                        self.current_title += data
-                    if self.in_snippet:
-                        self.current_snippet += data
-
-            parser = DDGParser()
-            parser.feed(response.text)
-
-            if not parser.results:
-                print("No results found.")
-                return None
-
-            # Format results
-            results_text = []
-            for i, r in enumerate(parser.results[:num_results], 1):
-                results_text.append(f"{i}. {r['title']}\n   {r['snippet']}")
-
-            web_context = f"WEB SEARCH RESULTS FOR: {query}\n\n" + "\n\n".join(results_text)
-            self.web_context = web_context
-            print(f"Found {min(len(parser.results), num_results)} results.\n")
-            return web_context
-
-        except Exception as e:
-            print(f"Web search error: {e}")
-            return None
-
-    def critique_essay(self, essay: str, style_context: str) -> str:
-        """Use Claude Opus to critique an essay for style authenticity.
-        
-        Returns specific, actionable feedback for improvement.
-        """
-        print("Critiquing essay with Claude Opus...")
-
-        critique_prompt = f"""You are a writing style expert. Compare this essay against the style sources and identify specific ways the essay fails to match the authentic voice.
-
-STYLE SOURCES (the target voice to match):
-{style_context[:15000]}
-
-ESSAY TO CRITIQUE:
-{essay}
-
-Provide a detailed critique focusing on:
-
-1. VOICE MISMATCHES
-   - Where does the essay sound generic or AI-like?
-   - What phrases feel out of character?
-   - Where is the vocabulary too formal/informal compared to sources?
-
-2. STRUCTURAL DIFFERENCES  
-   - How do paragraph patterns differ?
-   - Are sentences too uniform in length?
-   - Missing rhetorical techniques from the source?
-
-3. SPECIFIC FIXES (most important)
-   - List 5-7 concrete changes to make
-   - Be extremely specific: "Change X to Y" or "Add Z technique in paragraph N"
-   - Focus on changes that will make the biggest authenticity improvement
-
-Be harsh and specific. Vague feedback like "make it more conversational" is useless. 
-Instead say: "Paragraph 3 uses 'furthermore' and 'additionally' - the source author never uses these transition words. Replace with shorter sentences that imply connection, or use 'And' to start sentences."
-"""
-
-        message = self.client.messages.create(
-            model="claude-opus-4-20250514",
-            max_tokens=2000,
-            messages=[{"role": "user", "content": critique_prompt}]
-        )
-
-        critique = message.content[0].text
-        print("Critique complete.\n")
-        return critique
-
-    def refine_essay(self, essay: str, prompt: str, style_context: str) -> str:
-        """Refine an essay based on Opus critique.
-        
-        Uses the full critique → revise pipeline.
-        """
-        # Get critique from Opus
-        critique = self.critique_essay(essay, style_context)
-
-        print("Refining essay based on critique...")
-
-        # Revise with Sonnet
-        revision_prompt = f"""Revise this essay based on the style critique below. Make every suggested change.
-
-ORIGINAL ESSAY:
-{essay}
-
-STYLE CRITIQUE (follow these instructions precisely):
-{critique}
-
-STYLE REFERENCE:
-{style_context[:10000]}
-
-Rewrite the essay incorporating ALL the critique's suggestions. The goal is perfect style authenticity."""
-
-        message = self.client.messages.create(
-            model="claude-sonnet-4-5-20250929",
-            max_tokens=5000,
-            messages=[{"role": "user", "content": revision_prompt}]
-        )
-
-        refined = message.content[0].text
-        print("Refinement complete.\n")
-        return refined
-
     def generate_essay(self, prompt: str, top_k: Optional[int] = None,
                        max_tokens: int = 4000, revision_feedback: Optional[str] = None,
-                       previous_essay: Optional[str] = None,
-                       user_context: Optional[str] = None) -> Tuple[str, List[Dict], List[Dict]]:
+                       previous_essay: Optional[str] = None) -> Tuple[str, List[Dict], List[Dict]]:
         """Generate an essay using retrieved context.
 
         Returns tuple of (essay_text, style_sources_used, research_sources_used)
         """
         k = top_k or self.top_k
 
-        # Retrieve more chunks if deduplication is enabled
-        retrieve_k = k * 2 if self.deduplicate else k
-
         # Retrieve STYLE chunks (for voice/tone)
-        print(f"Retrieving style context (top {k} chunks, MMR={'on' if self.use_mmr else 'off'}, dedup={'on' if self.deduplicate else 'off'})...")
+        print(f"Retrieving style context (top {k} chunks, MMR={'on' if self.use_mmr else 'off'})...")
         if self.use_mmr:
-            style_results = self.retrieve_mmr_by_type(prompt, 'style', top_k=retrieve_k, lambda_param=self.mmr_lambda)
+            style_results = self.retrieve_mmr_by_type(prompt, 'style', top_k=k, lambda_param=self.mmr_lambda)
         else:
-            style_results = self.retrieve_by_type(prompt, 'style', top_k=retrieve_k)
-
-        # Deduplicate if enabled
-        if self.deduplicate and len(style_results) > k:
-            style_results = self.deduplicate_chunks(style_results, self.dedup_threshold)[:k]
+            style_results = self.retrieve_by_type(prompt, 'style', top_k=k)
 
         # Retrieve RESEARCH chunks (for facts/information) from index
         research_results = []
         if self.use_research and self.config.get('research_chunks', 0) > 0:
             print(f"Retrieving research context (top {k} chunks)...")
             if self.use_mmr:
-                research_results = self.retrieve_mmr_by_type(prompt, 'research', top_k=retrieve_k, lambda_param=self.mmr_lambda)
+                research_results = self.retrieve_mmr_by_type(prompt, 'research', top_k=k, lambda_param=self.mmr_lambda)
             else:
-                research_results = self.retrieve_by_type(prompt, 'research', top_k=retrieve_k)
-
-            # Deduplicate research too
-            if self.deduplicate and len(research_results) > k:
-                research_results = self.deduplicate_chunks(research_results, self.dedup_threshold)[:k]
+                research_results = self.retrieve_by_type(prompt, 'research', top_k=k)
 
         # Build style context
         style_parts = []
@@ -1003,23 +591,15 @@ Rewrite the essay incorporating ALL the critique's suggestions. The goal is perf
         # Build system prompt based on what sources are available
         has_structure = bool(self.structure_sources)
         has_research = bool(research_results) or bool(self.research_sources)
-        has_style_profile = bool(self.style_profile)
-        has_web = bool(self.web_context)
 
         if has_structure or has_research:
             distinctions = ["- STYLE SOURCES: Use these to capture the author's voice, tone, rhetorical techniques, vocabulary, sentence structure, and way of thinking. Your writing should feel like it was written by this author."]
-
-            if has_style_profile:
-                distinctions.append("- STYLE PROFILE: This is an analyzed breakdown of the author's specific patterns. Follow these patterns precisely.")
 
             if has_structure:
                 distinctions.append("- STRUCTURE SOURCES: Use these as a template for essay organization, section flow, how arguments are built and developed, paragraph structure, and overall narrative arc. Mimic the STRUCTURE but NOT the voice or vocabulary.")
 
             if has_research:
                 distinctions.append("- RESEARCH SOURCES: Use these for factual information, data, and subject matter expertise. Extract relevant facts and insights, but do NOT let these influence your writing style or structure.")
-
-            if has_web:
-                distinctions.append("- WEB RESEARCH: Current information from the web. Use for timely facts and recent developments.")
 
             system_prompt = f"""You are an essay writer that combines elements from multiple source types.
 
@@ -1028,31 +608,17 @@ IMPORTANT DISTINCTIONS:
 
 Your essay should:
 1. Sound like the author from the STYLE SOURCES (voice, tone, word choice)
-{('2. Follow the STYLE PROFILE patterns precisely' + chr(10)) if has_style_profile else ''}{('3. ' if has_style_profile else '2. ') + 'Be organized like the STRUCTURE SOURCES (sections, flow, argument development)' + chr(10) if has_structure else ''}{'4. ' if has_style_profile and has_structure else '3. ' if has_style_profile or has_structure else '2. '}Incorporate facts from RESEARCH SOURCES and WEB RESEARCH if provided"""
+{('2. Be organized like the STRUCTURE SOURCES (sections, flow, argument development)' + chr(10)) if has_structure else ''}{'3. ' if has_structure else '2. '}Incorporate facts from RESEARCH SOURCES if provided"""
         else:
-            style_profile_instruction = """
+            system_prompt = """You are an essay writer that mimics the writing style, voice, and analytical approach of the source material provided.
 
-Additionally, a STYLE PROFILE with specific patterns has been provided. Follow these patterns precisely to achieve authentic style matching.""" if has_style_profile else ""
-
-            system_prompt = f"""You are an essay writer that mimics the writing style, voice, and analytical approach of the source material provided.
-
-Carefully analyze the voice, tone, rhetorical techniques, vocabulary, sentence structure, and thematic interests present in the source material. Then write an essay on the given topic that authentically captures this distinctive style.{style_profile_instruction}
+Carefully analyze the voice, tone, rhetorical techniques, vocabulary, sentence structure, and thematic interests present in the source material. Then write an essay on the given topic that authentically captures this distinctive style.
 
 Your essay should feel like it could have been written by the original author."""
 
-        # Add writing rules if enabled
-        if self.writing_rules_enabled and self.writing_rules:
-            rules_text = "\n".join([f"- {rule}" for rule in self.writing_rules])
-            system_prompt += f"""
-
-MANDATORY WRITING RULES (never break these):
-{rules_text}"""
-
-        # Build user message sections
+        # Build user message
         structure_section = f"\n\nSTRUCTURE SOURCES (mimic this organization and flow):\n{structure_context}" if structure_context else ""
         research_section = f"\n\nRESEARCH SOURCES (for information only):\n{research_context}" if research_context else ""
-        style_profile_section = f"\n\nSTYLE PROFILE (follow these patterns precisely):\n{self.style_profile}" if self.style_profile else ""
-        web_section = f"\n\nWEB RESEARCH (current information):\n{self.web_context}" if self.web_context else ""
 
         if revision_feedback and previous_essay:
             # Revision mode
@@ -1067,25 +633,22 @@ REVISION FEEDBACK:
 {revision_feedback}
 
 STYLE SOURCES (mimic this writing voice and tone):
-{style_context}{style_profile_section}{structure_section}{research_section}{web_section}
+{style_context}{structure_section}{research_section}
 
 Please revise the essay according to the feedback while maintaining the style from STYLE SOURCES{' and structure from STRUCTURE SOURCES' if structure_context else ''}."""
             print("Revising essay with Claude Sonnet 4.5...\n")
         else:
             structure_instruction = " Follow the organizational patterns from STRUCTURE SOURCES." if structure_context else ""
             research_instruction = " Incorporate facts from RESEARCH SOURCES." if research_context else ""
-            web_instruction = " Include relevant current information from WEB RESEARCH." if self.web_context else ""
-            context_section = f"\n\nCONTEXT (important background for this essay):\n{user_context}" if user_context else ""
-            context_instruction = " Consider the provided CONTEXT when framing your essay." if user_context else ""
 
             user_message = f"""Based on the following materials, write an essay on this topic:
 
-TOPIC: {prompt}{context_section}
+TOPIC: {prompt}
 
 STYLE SOURCES (mimic this writing voice and tone):
-{style_context}{style_profile_section}{structure_section}{research_section}{web_section}
+{style_context}{structure_section}{research_section}
 
-Write a complete essay that captures the voice and tone from STYLE SOURCES.{structure_instruction}{research_instruction}{web_instruction}{context_instruction}"""
+Write a complete essay that captures the voice and tone from STYLE SOURCES.{structure_instruction}{research_instruction}"""
             print("Generating essay with Claude Sonnet 4.5...\n")
 
         # Call Claude API
@@ -1099,12 +662,6 @@ Write a complete essay that captures the voice and tone from STYLE SOURCES.{stru
         )
 
         essay = message.content[0].text
-
-        # Auto-refine if enabled (skip for revisions)
-        if self.auto_refine and not revision_feedback:
-            print("Auto-refining with Opus critique...")
-            essay = self.refine_essay(essay, prompt, style_context)
-
         return essay, style_results, research_results
 
     def preview_sources(self, prompt: str, top_k: Optional[int] = None) -> List[Dict]:
@@ -1117,44 +674,6 @@ Write a complete essay that captures the voice and tone from STYLE SOURCES.{stru
             results = self.retrieve(prompt, top_k=k)
 
         return results
-
-    def parse_write_command(self) -> Optional[Dict[str, str]]:
-        """Parse the structured write command input.
-        
-        Prompts user for Prompt, Context, and Search fields.
-        Returns dict with 'prompt', 'context', 'search' keys, or None if cancelled.
-        """
-        print("\n--- Write Essay ---")
-        print("(Enter each field, or leave blank to skip. Type 'cancel' to abort.)\n")
-        
-        # Get prompt (required)
-        prompt = input("Prompt: ").strip()
-        if prompt.lower() == 'cancel':
-            print("Cancelled.\n")
-            return None
-        if not prompt:
-            print("Prompt is required. Cancelled.\n")
-            return None
-        
-        # Get context (optional)
-        context = input("Context: ").strip()
-        if context.lower() == 'cancel':
-            print("Cancelled.\n")
-            return None
-        
-        # Get search query (optional)
-        search = input("Search: ").strip()
-        if search.lower() == 'cancel':
-            print("Cancelled.\n")
-            return None
-        
-        print()  # Blank line before generation starts
-        
-        return {
-            'prompt': prompt,
-            'context': context if context else None,
-            'search': search if search else None
-        }
 
     def get_all_sources(self) -> List[str]:
         """Get list of all unique source files."""
@@ -1181,29 +700,12 @@ Write a complete essay that captures the voice and tone from STYLE SOURCES.{stru
         print("=" * 60)
         print("""
 ESSAY GENERATION:
-  write             Start structured essay wizard (Prompt/Context/Search)
-  regenerate, r     Regenerate the last essay with same settings
+  <topic>           Write an essay on <topic>
+  regenerate, r     Regenerate the last essay with same prompt
 
 EDITING:
   edit <feedback>   Revise the last essay with your feedback
   e <feedback>      Short form of edit
-  refine            Critique & refine last essay with Opus
-
-STYLE ENHANCEMENT:
-  analyze           Analyze style sources and create style profile
-  profile           Show current style profile
-  save-profile <n>  Save current profile to profiles/<n>.txt
-  load-profile <n>  Load a saved profile
-  profiles          List all saved profiles
-  delete-profile    Delete a saved profile
-  clear-profile     Clear the active style profile
-  auto-refine       Toggle automatic Opus refinement (current: {})
-  rules on/off/show Toggle writing rules (anti-AI quirks, current: {})
-
-WEB RESEARCH:
-  web-results <N>   Set number of web results (current: {}, 1-20)
-  web               Show last web search results
-  clear-web         Clear web search context
 
 INDEXED SOURCES (rebuilt with build_index.py):
   transcripts/      .txt files → style sources (for voice/tone)
@@ -1233,7 +735,6 @@ RETRIEVAL SETTINGS:
   lambda <0-1>      Set MMR lambda (current: {:.1f})
                     Higher = more relevance, lower = more diversity
   use-research      Toggle indexed research retrieval (current: {})
-  dedup on/off      Toggle chunk deduplication (current: {})
 
 SOURCE CONTROL:
   preview <topic>   Preview sources for a topic without generating
@@ -1252,17 +753,7 @@ UTILITIES:
   settings          Show current settings
   help              Show this help message
   quit, exit, q     Exit the program
-""".format(
-            'on' if self.auto_refine else 'off',
-            'on' if self.writing_rules_enabled else 'off',
-            self.web_results,
-            self.structure_budget, 
-            self.top_k, 
-            'on' if self.use_mmr else 'off', 
-            self.mmr_lambda, 
-            'on' if self.use_research else 'off',
-            'on' if self.deduplicate else 'off'
-        ))
+""".format(self.structure_budget, self.top_k, 'on' if self.use_mmr else 'off', self.mmr_lambda, 'on' if self.use_research else 'off'))
 
     def interactive_mode(self):
         """Run interactive CLI mode."""
@@ -1272,10 +763,9 @@ UTILITIES:
         print("=" * 60)
         print("RAG Essay Writer - Interactive Mode")
         print("=" * 60)
-        print("\nType 'write' to start an essay, or 'help' for all commands.")
+        print("\nType 'help' for all commands, or just enter your essay topic.")
         print(f"Index: {style_count} style chunks, {research_count} research chunks")
-        print(f"Retrieval: {self.top_k} chunks, MMR {'on' if self.use_mmr else 'off'}, dedup {'on' if self.deduplicate else 'off'}")
-        print(f"Enhancement: auto-refine {'on' if self.auto_refine else 'off'}, rules {'on' if self.writing_rules_enabled else 'off'}, profile {'active' if self.style_profile else 'none'}")
+        print(f"Settings: {self.top_k} chunks per type, MMR {'on' if self.use_mmr else 'off'}, research {'on' if self.use_research else 'off'}")
         if self.excluded_sources:
             print(f"Excluded sources: {len(self.excluded_sources)}")
         print()
@@ -1302,28 +792,13 @@ UTILITIES:
                     self.print_help()
                     continue
 
-                # Write command - structured essay generation
-                if cmd == 'write':
-                    write_params = self.parse_write_command()
-                    if write_params:
-                        # Perform web search if requested
-                        if write_params['search']:
-                            self.web_search(write_params['search'])
-                        
-                        # Generate the essay
-                        self._generate_and_display(
-                            write_params['prompt'],
-                            user_context=write_params['context']
-                        )
-                    continue
-
                 # Regenerate
                 if cmd in ['regenerate', 'r']:
                     if not self.last_prompt:
-                        print("No previous essay to regenerate. Use 'write' first.\n")
+                        print("No previous essay to regenerate. Generate one first.\n")
                         continue
                     print(f"Regenerating essay on: {self.last_prompt}\n")
-                    self._generate_and_display(self.last_prompt, user_context=self.last_context)
+                    self._generate_and_display(self.last_prompt)
                     continue
 
                 # Edit/revise
@@ -1392,207 +867,6 @@ UTILITIES:
                         status = 'on' if self.use_research else 'off'
                         print(f"Research retrieval is currently: {status}")
                         print("Usage: use-research on/off\n")
-                    continue
-
-                # Toggle deduplication
-                if cmd == 'dedup':
-                    if args.lower() == 'on':
-                        self.deduplicate = True
-                        print("Chunk deduplication enabled.\n")
-                    elif args.lower() == 'off':
-                        self.deduplicate = False
-                        print("Chunk deduplication disabled.\n")
-                    else:
-                        status = 'on' if self.deduplicate else 'off'
-                        print(f"Deduplication is currently: {status}")
-                        print("Usage: dedup on/off\n")
-                    continue
-
-                # Set web search results count
-                if cmd == 'web-results':
-                    try:
-                        n = int(args)
-                        if n < 1 or n > 20:
-                            print("Please provide a number between 1 and 20.\n")
-                            continue
-                        self.web_results = n
-                        print(f"Web search will now return {n} results.\n")
-                    except ValueError:
-                        print(f"Web results is currently: {self.web_results}")
-                        print("Usage: web-results <N> (1-20)\n")
-                    continue
-
-                # Toggle auto-refine
-                if cmd == 'auto-refine':
-                    if args.lower() == 'on':
-                        self.auto_refine = True
-                        print("Auto-refine enabled (Opus will critique and refine each essay).\n")
-                    elif args.lower() == 'off':
-                        self.auto_refine = False
-                        print("Auto-refine disabled.\n")
-                    else:
-                        status = 'on' if self.auto_refine else 'off'
-                        print(f"Auto-refine is currently: {status}")
-                        print("Usage: auto-refine on/off\n")
-                    continue
-
-                # Toggle writing rules
-                if cmd == 'rules':
-                    if args.lower() == 'on':
-                        self.writing_rules_enabled = True
-                        print("Writing rules enabled (anti-AI quirks active).\n")
-                    elif args.lower() == 'off':
-                        self.writing_rules_enabled = False
-                        print("Writing rules disabled.\n")
-                    elif args.lower() == 'show':
-                        if self.writing_rules:
-                            print("\nWriting Rules:")
-                            for i, rule in enumerate(self.writing_rules, 1):
-                                print(f"  {i}. {rule}")
-                            print()
-                        else:
-                            print("No writing rules configured.\n")
-                    else:
-                        status = 'on' if self.writing_rules_enabled else 'off'
-                        print(f"Writing rules are currently: {status}")
-                        print(f"Rules configured: {len(self.writing_rules)}")
-                        print("Usage: rules on/off/show\n")
-                    continue
-
-                # Manual refine
-                if cmd == 'refine':
-                    if not self.last_essay:
-                        print("No essay to refine. Generate one first.\n")
-                        continue
-                    # Get style context for critique
-                    if self.use_mmr:
-                        style_results = self.retrieve_mmr_by_type(self.last_prompt, 'style', top_k=self.top_k)
-                    else:
-                        style_results = self.retrieve_by_type(self.last_prompt, 'style', top_k=self.top_k)
-                    style_context = "\n\n".join([r['text'] for r in style_results])
-                    
-                    refined = self.refine_essay(self.last_essay, self.last_prompt, style_context)
-                    self.last_essay = refined
-                    
-                    print("=" * 60)
-                    print("REFINED ESSAY")
-                    print("=" * 60)
-                    print()
-                    print(refined)
-                    print()
-                    print("=" * 60)
-                    print()
-                    continue
-
-                # Analyze style
-                if cmd == 'analyze':
-                    self.analyze_style()
-                    if self.style_profile:
-                        print("Style profile created. It will be used in future generations.")
-                        print("Use 'profile' to view it, or 'clear-profile' to remove it.\n")
-                    continue
-
-                # Show style profile
-                if cmd == 'profile':
-                    if self.style_profile:
-                        print("\n" + "=" * 60)
-                        print("STYLE PROFILE")
-                        print("=" * 60)
-                        print(self.style_profile)
-                        print("=" * 60 + "\n")
-                    else:
-                        print("No style profile active. Use 'analyze' to create one or 'load-profile <name>' to load a saved one.\n")
-                    continue
-
-                # Clear style profile
-                if cmd == 'clear-profile':
-                    self.style_profile = None
-                    print("Style profile cleared.\n")
-                    continue
-
-                # Save style profile
-                if cmd == 'save-profile':
-                    if not self.style_profile:
-                        print("No style profile to save. Use 'analyze' first.\n")
-                        continue
-                    if not args:
-                        print("Please provide a name. Example: save-profile my_style\n")
-                        continue
-                    # Create profiles directory if needed
-                    profiles_dir = Path("profiles")
-                    profiles_dir.mkdir(exist_ok=True)
-                    # Save profile
-                    profile_name = args.strip().replace(" ", "_")
-                    profile_path = profiles_dir / f"{profile_name}.txt"
-                    with open(profile_path, 'w', encoding='utf-8') as f:
-                        f.write(self.style_profile)
-                    print(f"Style profile saved to: {profile_path}\n")
-                    continue
-
-                # Load style profile
-                if cmd == 'load-profile':
-                    if not args:
-                        print("Please provide a profile name. Example: load-profile my_style")
-                        print("Use 'profiles' to list saved profiles.\n")
-                        continue
-                    profile_name = args.strip().replace(" ", "_")
-                    profile_path = Path("profiles") / f"{profile_name}.txt"
-                    if not profile_path.exists():
-                        # Try without .txt extension in case they included it
-                        if args.strip().endswith('.txt'):
-                            profile_path = Path("profiles") / args.strip()
-                        if not profile_path.exists():
-                            print(f"Profile not found: {profile_name}")
-                            print("Use 'profiles' to list saved profiles.\n")
-                            continue
-                    with open(profile_path, 'r', encoding='utf-8') as f:
-                        self.style_profile = f.read()
-                    print(f"Loaded style profile: {profile_name}\n")
-                    continue
-
-                # List saved profiles
-                if cmd == 'profiles':
-                    profiles_dir = Path("profiles")
-                    if not profiles_dir.exists():
-                        print("No saved profiles yet. Use 'save-profile <name>' after running 'analyze'.\n")
-                        continue
-                    profiles = list(profiles_dir.glob("*.txt"))
-                    if not profiles:
-                        print("No saved profiles yet. Use 'save-profile <name>' after running 'analyze'.\n")
-                        continue
-                    print(f"\nSaved style profiles ({len(profiles)}):\n")
-                    for p in sorted(profiles):
-                        size = p.stat().st_size
-                        print(f"  - {p.stem} ({size:,} bytes)")
-                    print()
-                    continue
-
-                # Delete a saved profile
-                if cmd == 'delete-profile':
-                    if not args:
-                        print("Please provide a profile name. Example: delete-profile my_style\n")
-                        continue
-                    profile_name = args.strip().replace(" ", "_")
-                    profile_path = Path("profiles") / f"{profile_name}.txt"
-                    if not profile_path.exists():
-                        print(f"Profile not found: {profile_name}\n")
-                        continue
-                    profile_path.unlink()
-                    print(f"Deleted profile: {profile_name}\n")
-                    continue
-
-                # Show web context
-                if cmd == 'web':
-                    if self.web_context:
-                        print("\n" + self.web_context + "\n")
-                    else:
-                        print("No web search results. Use 'write' and enter a Search query.\n")
-                    continue
-
-                # Clear web context
-                if cmd == 'clear-web':
-                    self.web_context = None
-                    print("Web context cleared.\n")
                     continue
 
                 # Load single PDF
@@ -1883,16 +1157,8 @@ UTILITIES:
                     print(f"  Chunks to retrieve (per type): {self.top_k}")
                     print(f"  MMR diversity: {'on' if self.use_mmr else 'off'}")
                     print(f"  MMR lambda: {self.mmr_lambda:.2f}")
-                    print(f"  Deduplication: {'on' if self.deduplicate else 'off'}")
                     print(f"  Use indexed research: {'on' if self.use_research else 'off'}")
                     print(f"  Structure budget: {self.structure_budget:,} chars")
-                    print(f"\nStyle Enhancement:")
-                    print(f"  Style profile: {'active' if self.style_profile else 'none'}")
-                    print(f"  Auto-refine (Opus): {'on' if self.auto_refine else 'off'}")
-                    print(f"  Writing rules: {'on' if self.writing_rules_enabled else 'off'} ({len(self.writing_rules)} rules)")
-                    print(f"\nWeb Search:")
-                    print(f"  Results per search: {self.web_results}")
-                    print(f"  Web context: {'active' if self.web_context else 'none'}")
                     print(f"\nIndexed Sources:")
                     print(f"  Style chunks (transcripts): {style_count}")
                     print(f"  Research chunks (PDFs): {research_count}")
@@ -1904,9 +1170,9 @@ UTILITIES:
                     print()
                     continue
 
-                # Unknown command
-                print(f"Unknown command: {cmd}")
-                print("Use 'write' to start an essay, or 'help' for all commands.\n")
+                # Otherwise, treat as essay prompt
+                print()
+                self._generate_and_display(user_input)
 
             except KeyboardInterrupt:
                 print("\n\nGoodbye!")
@@ -1915,21 +1181,18 @@ UTILITIES:
                 print(f"\nError: {e}\n")
 
     def _generate_and_display(self, prompt: str, revision_feedback: Optional[str] = None,
-                              previous_essay: Optional[str] = None,
-                              user_context: Optional[str] = None):
+                              previous_essay: Optional[str] = None):
         """Generate essay and display with options."""
         import datetime
 
         essay, style_sources, research_sources = self.generate_essay(
             prompt,
             revision_feedback=revision_feedback,
-            previous_essay=previous_essay,
-            user_context=user_context
+            previous_essay=previous_essay
         )
 
         # Update state
         self.last_prompt = prompt
-        self.last_context = user_context
         self.last_essay = essay
         self.last_sources = style_sources
         self.last_research_sources = research_sources
