@@ -1,0 +1,13 @@
+.env
+*.pyc
+__pycache__/
+index/
+*.index
+*.pkl
+venv/
+.venv/
+research/*
+structure/*
+transcripts/*
+.claude/
+tests/
