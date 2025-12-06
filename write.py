@@ -46,6 +46,17 @@ def load_settings() -> Dict:
         },
         "structure": {
             "budget": 20000
+        },
+        "writing_rules": {
+            "enabled": True,
+            "rules": [
+                "NEVER use em-dashes (—). Use commas, periods, or parentheses instead.",
+                "AVOID overused words: crucial, pivotal, landscape, navigate, delve, foster, realm, embark, journey.",
+                "AVOID hedging phrases like 'It's important to note that' or 'Needless to say'.",
+                "NEVER end with generic conclusions or 'only time will tell'.",
+                "VARY sentence length naturally.",
+                "NEVER use 'In conclusion' or 'To summarize' to start final paragraphs."
+            ]
         }
     }
     
@@ -99,6 +110,11 @@ class RAGWriter:
         self.dedup_threshold = settings['retrieval']['dedup_threshold']
         self.web_results = settings['web_search']['num_results']
         self.structure_budget = settings['structure']['budget']
+        
+        # Writing rules (anti-AI-detection guidelines)
+        writing_rules_config = settings.get('writing_rules', {'enabled': False, 'rules': []})
+        self.writing_rules_enabled = writing_rules_config.get('enabled', False)
+        self.writing_rules = writing_rules_config.get('rules', [])
         self.last_prompt = None
         self.last_context = None  # User-provided context for last essay
         self.last_essay = None
@@ -1024,6 +1040,14 @@ Carefully analyze the voice, tone, rhetorical techniques, vocabulary, sentence s
 
 Your essay should feel like it could have been written by the original author."""
 
+        # Add writing rules if enabled
+        if self.writing_rules_enabled and self.writing_rules:
+            rules_text = "\n".join([f"- {rule}" for rule in self.writing_rules])
+            system_prompt += f"""
+
+MANDATORY WRITING RULES (never break these):
+{rules_text}"""
+
         # Build user message sections
         structure_section = f"\n\nSTRUCTURE SOURCES (mimic this organization and flow):\n{structure_context}" if structure_context else ""
         research_section = f"\n\nRESEARCH SOURCES (for information only):\n{research_context}" if research_context else ""
@@ -1174,6 +1198,7 @@ STYLE ENHANCEMENT:
   delete-profile    Delete a saved profile
   clear-profile     Clear the active style profile
   auto-refine       Toggle automatic Opus refinement (current: {})
+  rules on/off/show Toggle writing rules (anti-AI quirks, current: {})
 
 WEB RESEARCH:
   web-results <N>   Set number of web results (current: {}, 1-20)
@@ -1229,6 +1254,7 @@ UTILITIES:
   quit, exit, q     Exit the program
 """.format(
             'on' if self.auto_refine else 'off',
+            'on' if self.writing_rules_enabled else 'off',
             self.web_results,
             self.structure_budget, 
             self.top_k, 
@@ -1249,7 +1275,7 @@ UTILITIES:
         print("\nType 'write' to start an essay, or 'help' for all commands.")
         print(f"Index: {style_count} style chunks, {research_count} research chunks")
         print(f"Retrieval: {self.top_k} chunks, MMR {'on' if self.use_mmr else 'off'}, dedup {'on' if self.deduplicate else 'off'}")
-        print(f"Enhancement: auto-refine {'on' if self.auto_refine else 'off'}, profile {'active' if self.style_profile else 'none'}")
+        print(f"Enhancement: auto-refine {'on' if self.auto_refine else 'off'}, rules {'on' if self.writing_rules_enabled else 'off'}, profile {'active' if self.style_profile else 'none'}")
         if self.excluded_sources:
             print(f"Excluded sources: {len(self.excluded_sources)}")
         print()
@@ -1408,6 +1434,29 @@ UTILITIES:
                         status = 'on' if self.auto_refine else 'off'
                         print(f"Auto-refine is currently: {status}")
                         print("Usage: auto-refine on/off\n")
+                    continue
+
+                # Toggle writing rules
+                if cmd == 'rules':
+                    if args.lower() == 'on':
+                        self.writing_rules_enabled = True
+                        print("Writing rules enabled (anti-AI quirks active).\n")
+                    elif args.lower() == 'off':
+                        self.writing_rules_enabled = False
+                        print("Writing rules disabled.\n")
+                    elif args.lower() == 'show':
+                        if self.writing_rules:
+                            print("\nWriting Rules:")
+                            for i, rule in enumerate(self.writing_rules, 1):
+                                print(f"  {i}. {rule}")
+                            print()
+                        else:
+                            print("No writing rules configured.\n")
+                    else:
+                        status = 'on' if self.writing_rules_enabled else 'off'
+                        print(f"Writing rules are currently: {status}")
+                        print(f"Rules configured: {len(self.writing_rules)}")
+                        print("Usage: rules on/off/show\n")
                     continue
 
                 # Manual refine
@@ -1840,6 +1889,7 @@ UTILITIES:
                     print(f"\nStyle Enhancement:")
                     print(f"  Style profile: {'active' if self.style_profile else 'none'}")
                     print(f"  Auto-refine (Opus): {'on' if self.auto_refine else 'off'}")
+                    print(f"  Writing rules: {'on' if self.writing_rules_enabled else 'off'} ({len(self.writing_rules)} rules)")
                     print(f"\nWeb Search:")
                     print(f"  Results per search: {self.web_results}")
                     print(f"  Web context: {'active' if self.web_context else 'none'}")

@@ -114,6 +114,7 @@ Generating essay with Claude Sonnet 4.5...
 | `delete-profile <name>` | Delete a saved profile |
 | `clear-profile` | Clear the active profile |
 | `auto-refine on/off` | Toggle automatic Opus refinement |
+| `rules on/off/show` | Toggle writing rules (anti-AI quirks) |
 
 ### Retrieval Settings
 
@@ -278,6 +279,14 @@ The `settings.json` file controls default values for all settings. Edit this fil
     },
     "structure": {
         "budget": 20000
+    },
+    "writing_rules": {
+        "enabled": true,
+        "rules": [
+            "NEVER use em-dashes (—). Use commas, periods, or parentheses instead.",
+            "AVOID overused words: crucial, pivotal, landscape, navigate, delve...",
+            "..."
+        ]
     }
 }
 ```
@@ -295,8 +304,23 @@ The `settings.json` file controls default values for all settings. Edit this fil
 | `num_results` | Number of web search results to retrieve |
 | `auto_refine` | Automatically refine essays with Opus |
 | `budget` | Max characters for structure source sampling |
+| `writing_rules.enabled` | Whether to enforce anti-AI writing rules |
+| `writing_rules.rules` | List of rules the AI must follow (editable) |
 
 **Note:** Changes made during a session (e.g., `chunks 20`) do not modify `settings.json`. On the next startup, the program reloads from the file.
+
+### Writing Rules
+
+The `writing_rules` section helps avoid common AI writing quirks that make essays feel artificial. Default rules include:
+
+- No em-dashes (—)
+- No clichéd openings ("In today's world...")
+- No overused AI words (crucial, delve, landscape, navigate, foster...)
+- No hedging phrases ("It's important to note...")
+- No generic conclusions
+- Natural sentence variety
+
+You can customize these rules in `settings.json`. Add, remove, or modify rules to match your preferences.
 
 ## Tips
 
