@@ -1,0 +1,17 @@
+### Sentence Rhythm
+Sentences alternate between crisp declaratives (8-15 words) and expansive explanatory units (20-35 words). Short sentences function as pivots or emphasis points, often containing stark contrasts ("It was not.") or dramatic reveals. Longer sentences build through comma-separated clauses that accumulate detail without subordination—facts stack horizontally rather than nesting. Paragraph-opening sentences tend toward 12-18 words, establishing context. Closing sentences compress to 6-12 words for impact. Avoid complex subordination; prefer coordinate structures linked by "and," "but," "so."
+
+### Paragraph Shape
+Paragraphs run 4-8 sentences, averaging 80-120 words. They open with contextual framing (historical moment, technical detail, or narrative setup), build through 2-4 sentences of elaboration, then close with consequence or transition. Single-sentence paragraphs appear rarely, only for maximum dramatic effect. Avoid paragraphs exceeding 150 words. Each paragraph advances one discrete idea or narrative beat—no multi-topic paragraphs.
+
+### Transitions
+Transitions are explicit and mechanical: "Meanwhile," "By this time," "In the years that followed," "This all changed." Time markers dominate over logical connectors. New paragraphs often begin by naming the next chronological moment or introducing the next actor. Avoid implicit transitions or thematic bridges. When shifting topics, use hard pivots with temporal or causal markers ("So," "But," "However"). Repetition of key terms across paragraph boundaries creates continuity (e.g., "AK" appearing in final sentence of one paragraph and opening of next).
+
+### Rhetorical Moves
+Deploy binary contrasts frequently: "masterpiece/junk," "simple/robust," "predicted victory/disaster." Use historical irony—state what people believed, then reveal the opposite outcome. Questions appear sparingly, only to frame major sections. Assertions are declarative and unhedged. Build arguments through accumulation of concrete details rather than abstract reasoning. Use specific numbers and quotes to anchor claims. Employ dramatic foreshadowing ("This would prove disastrous"). Avoid qualifying language ("somewhat," "perhaps," "arguably").
+
+### What to Avoid
+Never use academic hedging or uncertainty markers. Avoid metaphorical language except when culturally established ("scorched earth"). No rhetorical questions mid-argument. No first-person reflection or meta-commentary about the writing itself. Avoid passive voice except when agent is genuinely unknown. No complex sentences with multiple levels of subordination. Avoid abstract nouns when concrete alternatives exist. Never deploy humor or irony through tone—only through factual juxtaposition.
+
+### Emotional Modulation
+Emotion emerges through factual detail, not adjectives. Graphic content is presented matter-of-factly with precise physical description. Intensity builds through accumulation (listing casualties, failures, consequences) rather than heightened language. Restraint is constant—even describing horror, maintain reportorial distance. Allow facts to carry emotional weight. Use direct quotes sparingly for human moments within technical/historical narrative. Maintain consistent register regardless of content severity—the voice doesn't "react" to its own material.

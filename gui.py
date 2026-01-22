@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Modern GUI for RAG Essay Writer - Swedish Minimalist Design."""
+"""Modern GUI for RAG Essay Writer - Swedish Minimalist Design.
+
+Supports two modes:
+- Classic: Traditional RAG with style chunks passed to writer
+- Hybrid: Multi-stage pipeline with voice spec (no raw text to writer)
+"""
 
 import os
 import sys
@@ -11,8 +16,9 @@ import customtkinter as ctk
 from tkinter import filedialog, messagebox
 import tkinter as tk
 
-# Import the core RAG writer
+# Import the core systems
 from write import RAGWriter, load_settings
+from pipeline import HybridPipeline, PipelineConfig
 
 
 # Swedish minimalist color palette
@@ -70,7 +76,6 @@ class Tooltip:
         )
         label.pack()
         
-        # Add subtle border
         tw.configure(highlightbackground=COLORS["border"], highlightthickness=1)
         
     def _hide(self, event=None):
@@ -102,14 +107,14 @@ class ModelConfig:
     PROVIDERS = {
         "Anthropic": {
             "models": [
-                "claude-sonnet-4-5-20250929",
                 "claude-opus-4-20250514",
+                "claude-sonnet-4-5-20250929",
                 "claude-3-5-sonnet-20241022",
                 "claude-3-opus-20240229",
                 "claude-3-haiku-20240307",
             ],
             "env_key": "ANTHROPIC_API_KEY",
-            "default": "claude-sonnet-4-5-20250929",
+            "default": "claude-opus-4-20250514",
         },
         "OpenAI": {
             "models": [
@@ -138,7 +143,6 @@ class ModelConfig:
                 "mistral-large-latest",
                 "mistral-medium-latest",
                 "mistral-small-latest",
-                "codestral-latest",
             ],
             "env_key": "MISTRAL_API_KEY",
             "default": "mistral-large-latest",
@@ -148,7 +152,6 @@ class ModelConfig:
                 "llama-3.3-70b-versatile",
                 "llama-3.1-8b-instant",
                 "mixtral-8x7b-32768",
-                "gemma2-9b-it",
             ],
             "env_key": "GROQ_API_KEY",
             "default": "llama-3.3-70b-versatile",
@@ -157,10 +160,8 @@ class ModelConfig:
     
     @classmethod
     def get_available_providers(cls) -> List[str]:
-        """Get list of providers with valid API keys."""
         from dotenv import load_dotenv
         load_dotenv()
-        
         available = []
         for provider, config in cls.PROVIDERS.items():
             if os.getenv(config["env_key"]):
@@ -182,21 +183,18 @@ class SourcesPanel(ctk.CTkFrame):
     def __init__(self, parent, writer: RAGWriter, **kwargs):
         super().__init__(parent, fg_color=COLORS["bg_secondary"], corner_radius=0, **kwargs)
         self.writer = writer
-        self.checkboxes = {}  # Store checkbox vars by source name
+        self.checkboxes = {}
         
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(2, weight=1)
         
-        # Header
         header = ctk.CTkLabel(
-            self, 
-            text="Sources", 
+            self, text="Sources", 
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=COLORS["text_primary"]
         )
         header.grid(row=0, column=0, padx=12, pady=(12, 6), sticky="w")
         
-        # Source type dropdown
         self.source_type_var = ctk.StringVar(value="Style")
         self.source_dropdown = ctk.CTkOptionMenu(
             self,
@@ -213,42 +211,27 @@ class SourcesPanel(ctk.CTkFrame):
             width=140
         )
         self.source_dropdown.grid(row=1, column=0, padx=12, pady=(0, 6), sticky="w")
-        
         Tooltip(self.source_dropdown, "Style: indexed transcripts\nResearch: indexed PDFs\nStructure: org templates\nExtra PDFs: runtime loaded")
         
-        # Scrollable source list with checkboxes
-        self.source_scroll = ctk.CTkScrollableFrame(
-            self, 
-            fg_color=COLORS["bg_input"],
-            corner_radius=4
-        )
+        self.source_scroll = ctk.CTkScrollableFrame(self, fg_color=COLORS["bg_input"], corner_radius=4)
         self.source_scroll.grid(row=2, column=0, padx=12, pady=(0, 6), sticky="nsew")
         self.source_scroll.grid_columnconfigure(0, weight=1)
         
-        # Action buttons
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="ew")
         btn_frame.grid_columnconfigure((0, 1), weight=1)
         
         self.add_btn = ctk.CTkButton(
-            btn_frame, 
-            text="Add",
-            font=ctk.CTkFont(size=11),
-            fg_color=COLORS["bg_tertiary"],
-            hover_color=COLORS["border"],
-            height=26,
-            command=self._add_source
+            btn_frame, text="Add", font=ctk.CTkFont(size=11),
+            fg_color=COLORS["bg_tertiary"], hover_color=COLORS["border"],
+            height=26, command=self._add_source
         )
         self.add_btn.grid(row=0, column=0, padx=(0, 3), sticky="ew")
         
         self.clear_btn = ctk.CTkButton(
-            btn_frame, 
-            text="Clear",
-            font=ctk.CTkFont(size=11),
-            fg_color=COLORS["accent"],
-            hover_color=COLORS["accent_hover"],
-            height=26,
-            command=self._clear_sources
+            btn_frame, text="Clear", font=ctk.CTkFont(size=11),
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            height=26, command=self._clear_sources
         )
         self.clear_btn.grid(row=0, column=1, padx=(3, 0), sticky="ew")
         
@@ -264,18 +247,14 @@ class SourcesPanel(ctk.CTkFrame):
             self.clear_btn.configure(state="normal")
         
     def _toggle_source(self, source_name: str, var: ctk.BooleanVar):
-        """Toggle source inclusion/exclusion."""
         if var.get():
-            # Checked = include (remove from excluded)
             self.writer.excluded_sources.discard(source_name)
         else:
-            # Unchecked = exclude
             self.writer.excluded_sources.add(source_name)
         
     def _refresh_list(self):
         source_type = self.source_type_var.get()
         
-        # Clear existing checkboxes
         for widget in self.source_scroll.winfo_children():
             widget.destroy()
         self.checkboxes.clear()
@@ -290,26 +269,17 @@ class SourcesPanel(ctk.CTkFrame):
                         text=s[:28] + "..." if len(s) > 28 else s,
                         variable=var,
                         command=lambda name=s, v=var: self._toggle_source(name, v),
-                        font=ctk.CTkFont(size=10),
-                        text_color=COLORS["text_secondary"],
-                        fg_color=COLORS["accent"],
-                        hover_color=COLORS["accent_hover"],
-                        border_color=COLORS["border"],
-                        checkmark_color=COLORS["text_primary"],
-                        height=22,
-                        checkbox_width=14,
-                        checkbox_height=14
+                        font=ctk.CTkFont(size=10), text_color=COLORS["text_secondary"],
+                        fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+                        border_color=COLORS["border"], checkmark_color=COLORS["text_primary"],
+                        height=22, checkbox_width=14, checkbox_height=14
                     )
                     cb.grid(row=i, column=0, sticky="w", pady=1)
                     self.checkboxes[s] = var
                     Tooltip(cb, s)
             else:
-                ctk.CTkLabel(
-                    self.source_scroll, 
-                    text="No style sources.\nAdd .txt to transcripts/",
-                    font=ctk.CTkFont(size=10),
-                    text_color=COLORS["text_muted"]
-                ).grid(row=0, column=0, sticky="w")
+                ctk.CTkLabel(self.source_scroll, text="No style sources.\nAdd .txt to transcripts/",
+                    font=ctk.CTkFont(size=10), text_color=COLORS["text_muted"]).grid(row=0, column=0, sticky="w")
                 
         elif source_type == "Research":
             _, research_sources = self.writer.get_sources_by_type()
@@ -321,80 +291,49 @@ class SourcesPanel(ctk.CTkFrame):
                         text=s[:28] + "..." if len(s) > 28 else s,
                         variable=var,
                         command=lambda name=s, v=var: self._toggle_source(name, v),
-                        font=ctk.CTkFont(size=10),
-                        text_color=COLORS["text_secondary"],
-                        fg_color=COLORS["accent"],
-                        hover_color=COLORS["accent_hover"],
-                        border_color=COLORS["border"],
-                        checkmark_color=COLORS["text_primary"],
-                        height=22,
-                        checkbox_width=14,
-                        checkbox_height=14
+                        font=ctk.CTkFont(size=10), text_color=COLORS["text_secondary"],
+                        fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+                        border_color=COLORS["border"], checkmark_color=COLORS["text_primary"],
+                        height=22, checkbox_width=14, checkbox_height=14
                     )
                     cb.grid(row=i, column=0, sticky="w", pady=1)
                     self.checkboxes[s] = var
                     Tooltip(cb, s)
             else:
-                ctk.CTkLabel(
-                    self.source_scroll, 
-                    text="No research sources.\nAdd .pdf to research/",
-                    font=ctk.CTkFont(size=10),
-                    text_color=COLORS["text_muted"]
-                ).grid(row=0, column=0, sticky="w")
+                ctk.CTkLabel(self.source_scroll, text="No research sources.\nAdd .pdf to research/",
+                    font=ctk.CTkFont(size=10), text_color=COLORS["text_muted"]).grid(row=0, column=0, sticky="w")
                 
         elif source_type == "Structure":
             if self.writer.structure_sources:
                 for i, s in enumerate(self.writer.structure_sources):
                     name = s['name']
                     sampled = " [s]" if s.get('sampled') else ""
-                    ctk.CTkLabel(
-                        self.source_scroll,
-                        text=f"{i+1}. {name[:24]}{sampled}",
-                        font=ctk.CTkFont(size=10),
-                        text_color=COLORS["text_secondary"]
-                    ).grid(row=i, column=0, sticky="w", pady=1)
+                    ctk.CTkLabel(self.source_scroll, text=f"{i+1}. {name[:24]}{sampled}",
+                        font=ctk.CTkFont(size=10), text_color=COLORS["text_secondary"]).grid(row=i, column=0, sticky="w", pady=1)
             else:
-                ctk.CTkLabel(
-                    self.source_scroll, 
-                    text="No structure sources.",
-                    font=ctk.CTkFont(size=10),
-                    text_color=COLORS["text_muted"]
-                ).grid(row=0, column=0, sticky="w")
+                ctk.CTkLabel(self.source_scroll, text="No structure sources.",
+                    font=ctk.CTkFont(size=10), text_color=COLORS["text_muted"]).grid(row=0, column=0, sticky="w")
                 
         elif source_type == "Extra PDFs":
             if self.writer.research_sources:
                 for i, s in enumerate(self.writer.research_sources):
-                    ctk.CTkLabel(
-                        self.source_scroll,
-                        text=f"{i+1}. {s['name'][:24]}",
-                        font=ctk.CTkFont(size=10),
-                        text_color=COLORS["text_secondary"]
-                    ).grid(row=i, column=0, sticky="w", pady=1)
+                    ctk.CTkLabel(self.source_scroll, text=f"{i+1}. {s['name'][:24]}",
+                        font=ctk.CTkFont(size=10), text_color=COLORS["text_secondary"]).grid(row=i, column=0, sticky="w", pady=1)
             else:
-                ctk.CTkLabel(
-                    self.source_scroll, 
-                    text="No extra PDFs loaded.",
-                    font=ctk.CTkFont(size=10),
-                    text_color=COLORS["text_muted"]
-                ).grid(row=0, column=0, sticky="w")
+                ctk.CTkLabel(self.source_scroll, text="No extra PDFs loaded.",
+                    font=ctk.CTkFont(size=10), text_color=COLORS["text_muted"]).grid(row=0, column=0, sticky="w")
         
     def _add_source(self):
         source_type = self.source_type_var.get()
         if source_type == "Structure":
-            filepath = filedialog.askopenfilename(
-                title="Select Structure Source",
-                filetypes=[("Text and PDF", "*.txt *.pdf")]
-            )
+            filepath = filedialog.askopenfilename(title="Select Structure Source", filetypes=[("Text and PDF", "*.txt *.pdf")])
             if filepath:
                 result = self.writer.load_structure_source(filepath, max_chars=self.writer.structure_budget)
                 if result:
                     self.writer.structure_sources.append(result)
                     self._refresh_list()
         elif source_type == "Extra PDFs":
-            filepath = filedialog.askopenfilename(
-                title="Select PDF",
-                filetypes=[("PDF", "*.pdf")]
-            )
+            filepath = filedialog.askopenfilename(title="Select PDF", filetypes=[("PDF", "*.pdf")])
             if filepath:
                 result = self.writer.load_pdf(filepath)
                 if result:
@@ -411,19 +350,60 @@ class SourcesPanel(ctk.CTkFrame):
 
 
 class SettingsPanel(ctk.CTkScrollableFrame):
-    """Compact settings panel with tooltips."""
+    """Compact settings panel with mode selection and tooltips."""
     
-    def __init__(self, parent, writer: RAGWriter, on_model_change: callable = None, **kwargs):
+    def __init__(self, parent, writer: RAGWriter, on_model_change: callable = None, on_mode_change: callable = None, **kwargs):
         super().__init__(parent, fg_color=COLORS["bg_secondary"], corner_radius=0, **kwargs)
         self.writer = writer
         self.on_model_change = on_model_change
+        self.on_mode_change = on_mode_change
         
         self.grid_columnconfigure(0, weight=1)
         
         row = 0
         
+        # MODE SECTION
+        self._add_section_header("Mode", row)
+        row += 1
+        
+        mode_frame = ctk.CTkFrame(self, fg_color="transparent")
+        mode_frame.grid(row=row, column=0, padx=8, pady=2, sticky="ew")
+        mode_frame.grid_columnconfigure(1, weight=1)
+        
+        self.mode_var = ctk.StringVar(value="Hybrid")
+        mode_dropdown = ctk.CTkOptionMenu(
+            mode_frame,
+            values=["Hybrid", "Hybrid Quick", "Classic"],
+            variable=self.mode_var,
+            command=self._on_mode_change,
+            fg_color=COLORS["accent"],
+            button_color=COLORS["accent"],
+            button_hover_color=COLORS["accent_hover"],
+            dropdown_fg_color=COLORS["bg_secondary"],
+            dropdown_hover_color=COLORS["accent"],
+            font=ctk.CTkFont(size=11, weight="bold"),
+            height=28
+        )
+        mode_dropdown.grid(row=0, column=0, columnspan=2, sticky="ew")
+        Tooltip(mode_dropdown, "Hybrid: 7-stage pipeline, voice spec\nHybrid Quick: Single draft pipeline\nClassic: Traditional RAG")
+        row += 1
+        
+        # Voice spec status
+        self.voice_status_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.voice_status_frame.grid(row=row, column=0, padx=8, pady=(4, 2), sticky="ew")
+        
+        self.voice_status = ctk.CTkLabel(
+            self.voice_status_frame,
+            text="Voice Spec: " + ("Loaded" if Path("voice_spec.txt").exists() else "Missing"),
+            font=ctk.CTkFont(size=10),
+            text_color=COLORS["accent"] if Path("voice_spec.txt").exists() else COLORS["text_muted"]
+        )
+        self.voice_status.pack(side="left")
+        Tooltip(self.voice_status, "Static voice specification for hybrid mode.\nRun 'python pipeline.py analyze' to create.")
+        row += 1
+        
         # Model section
-        self._add_section_header("Model", row)
+        self._add_section_header("Model", row, top_pad=6)
         row += 1
         
         # Provider
@@ -433,22 +413,16 @@ class SettingsPanel(ctk.CTkScrollableFrame):
         
         lbl = ctk.CTkLabel(provider_frame, text="Provider", font=ctk.CTkFont(size=10), text_color=COLORS["text_muted"], width=50, anchor="w")
         lbl.grid(row=0, column=0, sticky="w")
-        Tooltip(lbl, "AI provider to use for generation")
+        Tooltip(lbl, "AI provider for generation")
         
         available_providers = ModelConfig.get_available_providers()
         self.provider_var = ctk.StringVar(value=available_providers[0] if available_providers else "Anthropic")
         self.provider_dropdown = ctk.CTkOptionMenu(
-            provider_frame,
-            values=available_providers,
-            variable=self.provider_var,
+            provider_frame, values=available_providers, variable=self.provider_var,
             command=self._on_provider_change,
-            fg_color=COLORS["bg_tertiary"],
-            button_color=COLORS["bg_tertiary"],
-            button_hover_color=COLORS["border"],
-            dropdown_fg_color=COLORS["bg_secondary"],
-            dropdown_hover_color=COLORS["accent"],
-            font=ctk.CTkFont(size=10),
-            height=24
+            fg_color=COLORS["bg_tertiary"], button_color=COLORS["bg_tertiary"],
+            button_hover_color=COLORS["border"], dropdown_fg_color=COLORS["bg_secondary"],
+            dropdown_hover_color=COLORS["accent"], font=ctk.CTkFont(size=10), height=24
         )
         self.provider_dropdown.grid(row=0, column=1, sticky="ew", padx=(4, 0))
         row += 1
@@ -460,28 +434,22 @@ class SettingsPanel(ctk.CTkScrollableFrame):
         
         lbl = ctk.CTkLabel(model_frame, text="Model", font=ctk.CTkFont(size=10), text_color=COLORS["text_muted"], width=50, anchor="w")
         lbl.grid(row=0, column=0, sticky="w")
-        Tooltip(lbl, "Specific model to use")
+        Tooltip(lbl, "Specific model (writer in hybrid mode)")
         
         initial_models = ModelConfig.get_models(self.provider_var.get())
         self.model_var = ctk.StringVar(value=ModelConfig.get_default_model(self.provider_var.get()))
         self.model_dropdown = ctk.CTkOptionMenu(
-            model_frame,
-            values=initial_models if initial_models else ["claude-sonnet-4-5-20250929"],
-            variable=self.model_var,
-            command=self._on_model_change,
-            fg_color=COLORS["bg_tertiary"],
-            button_color=COLORS["bg_tertiary"],
-            button_hover_color=COLORS["border"],
-            dropdown_fg_color=COLORS["bg_secondary"],
-            dropdown_hover_color=COLORS["accent"],
-            font=ctk.CTkFont(size=10),
-            height=24
+            model_frame, values=initial_models if initial_models else ["claude-opus-4-20250514"],
+            variable=self.model_var, command=self._on_model_change_internal,
+            fg_color=COLORS["bg_tertiary"], button_color=COLORS["bg_tertiary"],
+            button_hover_color=COLORS["border"], dropdown_fg_color=COLORS["bg_secondary"],
+            dropdown_hover_color=COLORS["accent"], font=ctk.CTkFont(size=10), height=24
         )
         self.model_dropdown.grid(row=0, column=1, sticky="ew", padx=(4, 0))
         row += 1
         
         # Retrieval section
-        self._add_section_header("Retrieval", row, top_pad=8)
+        self._add_section_header("Retrieval", row, top_pad=6)
         row += 1
         
         # Chunks
@@ -491,7 +459,7 @@ class SettingsPanel(ctk.CTkScrollableFrame):
         
         lbl = ctk.CTkLabel(chunks_frame, text="Chunks", font=ctk.CTkFont(size=10), text_color=COLORS["text_muted"], width=50, anchor="w")
         lbl.grid(row=0, column=0, sticky="w")
-        Tooltip(lbl, "Number of text chunks to retrieve per source type. More chunks = more context but slower.")
+        Tooltip(lbl, "Number of chunks to retrieve. In hybrid mode, used for notes extraction.")
         
         slider_frame = ctk.CTkFrame(chunks_frame, fg_color="transparent")
         slider_frame.grid(row=0, column=1, sticky="ew", padx=(4, 0))
@@ -504,8 +472,7 @@ class SettingsPanel(ctk.CTkScrollableFrame):
             slider_frame, from_=1, to=30, number_of_steps=29,
             variable=self.chunks_var, command=self._on_chunks_change,
             fg_color=COLORS["bg_tertiary"], progress_color=COLORS["accent"],
-            button_color=COLORS["text_primary"], button_hover_color=COLORS["text_secondary"],
-            height=14
+            button_color=COLORS["text_primary"], button_hover_color=COLORS["text_secondary"], height=14
         )
         self.chunks_slider.grid(row=0, column=1, sticky="ew", padx=2)
         
@@ -522,7 +489,7 @@ class SettingsPanel(ctk.CTkScrollableFrame):
         
         lbl = ctk.CTkLabel(lambda_frame, text="MMR", font=ctk.CTkFont(size=10), text_color=COLORS["text_muted"], width=50, anchor="w")
         lbl.grid(row=0, column=0, sticky="w")
-        Tooltip(lbl, "MMR lambda: 1.0 = pure relevance, 0.0 = max diversity. Lower values retrieve more varied content.")
+        Tooltip(lbl, "MMR lambda: 1.0=relevance, 0.0=diversity")
         
         slider_frame2 = ctk.CTkFrame(lambda_frame, fg_color="transparent")
         slider_frame2.grid(row=0, column=1, sticky="ew", padx=(4, 0))
@@ -535,8 +502,7 @@ class SettingsPanel(ctk.CTkScrollableFrame):
             slider_frame2, from_=0, to=1, number_of_steps=20,
             variable=self.lambda_var, command=self._on_lambda_change,
             fg_color=COLORS["bg_tertiary"], progress_color=COLORS["accent"],
-            button_color=COLORS["text_primary"], button_hover_color=COLORS["text_secondary"],
-            height=14
+            button_color=COLORS["text_primary"], button_hover_color=COLORS["text_secondary"], height=14
         )
         self.lambda_slider.grid(row=0, column=1, sticky="ew", padx=2)
         
@@ -546,89 +512,95 @@ class SettingsPanel(ctk.CTkScrollableFrame):
         self.lambda_value.grid(row=0, column=3, padx=(4, 0))
         row += 1
         
-        # Toggles row 1: MMR + Dedup
+        # Toggles
         toggle_row1 = ctk.CTkFrame(self, fg_color="transparent")
         toggle_row1.grid(row=row, column=0, padx=8, pady=4, sticky="ew")
         toggle_row1.grid_columnconfigure((0, 1), weight=1)
         
         self.mmr_var = ctk.BooleanVar(value=writer.use_mmr)
         mmr_cb = ctk.CTkCheckBox(
-            toggle_row1, text="MMR", variable=self.mmr_var,
-            command=self._on_mmr_toggle,
+            toggle_row1, text="MMR", variable=self.mmr_var, command=self._on_mmr_toggle,
             font=ctk.CTkFont(size=10), text_color=COLORS["text_muted"],
             fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
             border_color=COLORS["border"], checkmark_color=COLORS["text_primary"],
-            height=20, checkbox_width=16, checkbox_height=16
+            height=20, checkbox_width=14, checkbox_height=14
         )
         mmr_cb.grid(row=0, column=0, sticky="w")
-        Tooltip(mmr_cb, "Enable Maximal Marginal Relevance for diverse retrieval")
+        Tooltip(mmr_cb, "Maximal Marginal Relevance for diverse retrieval")
         
         self.dedup_var = ctk.BooleanVar(value=writer.deduplicate)
         dedup_cb = ctk.CTkCheckBox(
-            toggle_row1, text="Dedup", variable=self.dedup_var,
-            command=self._on_dedup_toggle,
+            toggle_row1, text="Dedup", variable=self.dedup_var, command=self._on_dedup_toggle,
             font=ctk.CTkFont(size=10), text_color=COLORS["text_muted"],
             fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
             border_color=COLORS["border"], checkmark_color=COLORS["text_primary"],
-            height=20, checkbox_width=16, checkbox_height=16
+            height=20, checkbox_width=14, checkbox_height=14
         )
         dedup_cb.grid(row=0, column=1, sticky="w")
-        Tooltip(dedup_cb, "Remove near-duplicate chunks from retrieval")
+        Tooltip(dedup_cb, "Remove near-duplicate chunks")
         row += 1
         
-        # Toggles row 2: Research + Rules
-        toggle_row2 = ctk.CTkFrame(self, fg_color="transparent")
-        toggle_row2.grid(row=row, column=0, padx=8, pady=2, sticky="ew")
-        toggle_row2.grid_columnconfigure((0, 1), weight=1)
+        # Classic mode settings (hidden in hybrid)
+        self.classic_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.classic_frame.grid(row=row, column=0, padx=8, pady=2, sticky="ew")
+        self.classic_frame.grid_columnconfigure((0, 1), weight=1)
         
         self.research_var = ctk.BooleanVar(value=writer.use_research)
         research_cb = ctk.CTkCheckBox(
-            toggle_row2, text="Research", variable=self.research_var,
-            command=self._on_research_toggle,
+            self.classic_frame, text="Research", variable=self.research_var, command=self._on_research_toggle,
             font=ctk.CTkFont(size=10), text_color=COLORS["text_muted"],
             fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
             border_color=COLORS["border"], checkmark_color=COLORS["text_primary"],
-            height=20, checkbox_width=16, checkbox_height=16
+            height=20, checkbox_width=14, checkbox_height=14
         )
         research_cb.grid(row=0, column=0, sticky="w")
-        Tooltip(research_cb, "Include indexed research PDFs in retrieval")
+        Tooltip(research_cb, "Include indexed research in retrieval")
         
         self.rules_var = ctk.BooleanVar(value=writer.writing_rules_enabled)
         rules_cb = ctk.CTkCheckBox(
-            toggle_row2, text="Rules", variable=self.rules_var,
-            command=self._on_rules_toggle,
+            self.classic_frame, text="Rules", variable=self.rules_var, command=self._on_rules_toggle,
             font=ctk.CTkFont(size=10), text_color=COLORS["text_muted"],
             fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
             border_color=COLORS["border"], checkmark_color=COLORS["text_primary"],
-            height=20, checkbox_width=16, checkbox_height=16
+            height=20, checkbox_width=14, checkbox_height=14
         )
         rules_cb.grid(row=0, column=1, sticky="w")
-        Tooltip(rules_cb, "Enable writing rules to avoid AI-sounding patterns")
+        Tooltip(rules_cb, "Anti-AI writing rules (classic mode)")
         row += 1
         
-        # Enhancement section
-        self._add_section_header("Enhancement", row, top_pad=8)
+        # Hybrid settings
+        self._add_section_header("Pipeline", row, top_pad=6)
         row += 1
         
-        # Auto-refine toggle
-        refine_frame = ctk.CTkFrame(self, fg_color="transparent")
-        refine_frame.grid(row=row, column=0, padx=8, pady=4, sticky="ew")
+        self.hybrid_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.hybrid_frame.grid(row=row, column=0, padx=8, pady=2, sticky="ew")
+        self.hybrid_frame.grid_columnconfigure((0, 1), weight=1)
         
-        self.refine_var = ctk.BooleanVar(value=writer.auto_refine)
-        refine_cb = ctk.CTkCheckBox(
-            refine_frame, text="Auto-Refine", variable=self.refine_var,
-            command=self._on_refine_toggle,
+        self.critique_var = ctk.BooleanVar(value=True)
+        critique_cb = ctk.CTkCheckBox(
+            self.hybrid_frame, text="Critique", variable=self.critique_var,
             font=ctk.CTkFont(size=10), text_color=COLORS["text_muted"],
             fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
             border_color=COLORS["border"], checkmark_color=COLORS["text_primary"],
-            height=20, checkbox_width=16, checkbox_height=16
+            height=20, checkbox_width=14, checkbox_height=14
         )
-        refine_cb.pack(side="left")
-        Tooltip(refine_cb, "Automatically critique and refine each generated essay")
+        critique_cb.grid(row=0, column=0, sticky="w")
+        Tooltip(critique_cb, "External model critique stage (GPT)")
+        
+        self.dual_draft_var = ctk.BooleanVar(value=True)
+        dual_cb = ctk.CTkCheckBox(
+            self.hybrid_frame, text="Dual Draft", variable=self.dual_draft_var,
+            font=ctk.CTkFont(size=10), text_color=COLORS["text_muted"],
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            border_color=COLORS["border"], checkmark_color=COLORS["text_primary"],
+            height=20, checkbox_width=14, checkbox_height=14
+        )
+        dual_cb.grid(row=0, column=1, sticky="w")
+        Tooltip(dual_cb, "Generate both expressive and controlled drafts")
         row += 1
         
-        # Profile section
-        self._add_section_header("Style Profile", row, top_pad=8)
+        # Profile section (classic mode)
+        self._add_section_header("Style Profile", row, top_pad=6)
         row += 1
         
         profile_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -642,40 +614,31 @@ class SettingsPanel(ctk.CTkScrollableFrame):
             text_color=COLORS["text_muted"] if not writer.style_profile else COLORS["accent"]
         )
         self.profile_status.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 4))
+        Tooltip(self.profile_status, "Classic mode style profile (analyzed from sources)")
         
-        btn_style = {
-            "font": ctk.CTkFont(size=10),
-            "fg_color": COLORS["bg_tertiary"],
-            "hover_color": COLORS["border"],
-            "height": 24
-        }
+        btn_style = {"font": ctk.CTkFont(size=10), "fg_color": COLORS["bg_tertiary"], "hover_color": COLORS["border"], "height": 24}
         
         analyze_btn = ctk.CTkButton(profile_frame, text="Analyze", command=self._analyze_style, **btn_style)
         analyze_btn.grid(row=1, column=0, padx=1, sticky="ew")
-        Tooltip(analyze_btn, "Analyze style sources to create a detailed style profile")
+        Tooltip(analyze_btn, "Analyze sources for style profile")
         
         load_btn = ctk.CTkButton(profile_frame, text="Load", command=self._load_profile, **btn_style)
         load_btn.grid(row=1, column=1, padx=1, sticky="ew")
-        Tooltip(load_btn, "Load a previously saved style profile")
         
         save_btn = ctk.CTkButton(profile_frame, text="Save", command=self._save_profile, **btn_style)
         save_btn.grid(row=1, column=2, padx=1, sticky="ew")
-        Tooltip(save_btn, "Save current style profile to disk")
         
-        clear_btn = ctk.CTkButton(
-            profile_frame, text="Clear", command=self._clear_profile,
-            font=ctk.CTkFont(size=10), fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"], height=24
-        )
+        clear_btn = ctk.CTkButton(profile_frame, text="Clear", command=self._clear_profile,
+            font=ctk.CTkFont(size=10), fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"], height=24)
         clear_btn.grid(row=1, column=3, padx=1, sticky="ew")
-        Tooltip(clear_btn, "Clear the active style profile")
         
     def _add_section_header(self, text: str, row: int, top_pad: int = 0):
-        """Add a section header."""
-        ctk.CTkLabel(
-            self, text=text,
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color=COLORS["text_secondary"]
-        ).grid(row=row, column=0, padx=8, pady=(top_pad + 6, 4), sticky="w")
+        ctk.CTkLabel(self, text=text, font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=COLORS["text_secondary"]).grid(row=row, column=0, padx=8, pady=(top_pad + 6, 4), sticky="w")
+        
+    def _on_mode_change(self, value: str):
+        if self.on_mode_change:
+            self.on_mode_change(value)
         
     def _on_provider_change(self, value: str):
         models = ModelConfig.get_models(value)
@@ -685,7 +648,7 @@ class SettingsPanel(ctk.CTkScrollableFrame):
         if self.on_model_change:
             self.on_model_change(value, default_model)
             
-    def _on_model_change(self, value: str):
+    def _on_model_change_internal(self, value: str):
         if self.on_model_change:
             self.on_model_change(self.provider_var.get(), value)
         
@@ -706,9 +669,6 @@ class SettingsPanel(ctk.CTkScrollableFrame):
     def _on_research_toggle(self):
         self.writer.use_research = self.research_var.get()
         
-    def _on_refine_toggle(self):
-        self.writer.auto_refine = self.refine_var.get()
-        
     def _on_rules_toggle(self):
         self.writer.writing_rules_enabled = self.rules_var.get()
         
@@ -726,13 +686,10 @@ class SettingsPanel(ctk.CTkScrollableFrame):
             
     def _load_profile(self):
         profiles_dir = Path("profiles")
-        if not profiles_dir.exists():
+        if not profiles_dir.exists() or not list(profiles_dir.glob("*.txt")):
             messagebox.showinfo("No Profiles", "No saved profiles found.")
             return
         profiles = list(profiles_dir.glob("*.txt"))
-        if not profiles:
-            messagebox.showinfo("No Profiles", "No saved profiles found.")
-            return
             
         dialog = ctk.CTkToplevel(self)
         dialog.title("Load Profile")
@@ -743,11 +700,9 @@ class SettingsPanel(ctk.CTkScrollableFrame):
         
         ctk.CTkLabel(dialog, text="Select profile", font=ctk.CTkFont(size=12, weight="bold"), text_color=COLORS["text_primary"]).pack(pady=(12, 6))
         
-        listbox = tk.Listbox(
-            dialog, bg=COLORS["bg_input"], fg=COLORS["text_primary"], 
+        listbox = tk.Listbox(dialog, bg=COLORS["bg_input"], fg=COLORS["text_primary"], 
             selectbackground=COLORS["accent"], selectforeground=COLORS["text_primary"],
-            font=("Consolas", 10), borderwidth=0, highlightthickness=0
-        )
+            font=("Consolas", 10), borderwidth=0, highlightthickness=0)
         listbox.pack(fill="both", expand=True, padx=12, pady=6)
         
         for p in sorted(profiles):
@@ -786,6 +741,15 @@ class SettingsPanel(ctk.CTkScrollableFrame):
         
     def get_current_model(self) -> tuple:
         return self.provider_var.get(), self.model_var.get()
+    
+    def get_mode(self) -> str:
+        return self.mode_var.get()
+    
+    def get_pipeline_config(self) -> dict:
+        return {
+            "skip_critique": not self.critique_var.get(),
+            "dual_draft": self.dual_draft_var.get(),
+        }
 
 
 class RAGWriterGUI(ctk.CTk):
@@ -802,15 +766,15 @@ class RAGWriterGUI(ctk.CTk):
         self.configure(fg_color=COLORS["bg_primary"])
         
         self.current_provider = "Anthropic"
-        self.current_model = "claude-sonnet-4-5-20250929"
+        self.current_model = "claude-opus-4-20250514"
+        self.current_mode = "Hybrid"
         
-        # Sidebar widths
         self.grid_columnconfigure(0, weight=0, minsize=200)
         self.grid_columnconfigure(1, weight=1)
         self.grid_columnconfigure(2, weight=0, minsize=270)
         self.grid_rowconfigure(0, weight=1)
         
-        self._init_writer()
+        self._init_systems()
         self._create_left_panel()
         self._create_main_panel()
         self._create_right_panel()
@@ -818,9 +782,11 @@ class RAGWriterGUI(ctk.CTk):
         self.bind("<Control-Return>", lambda e: self._generate_essay())
         self.bind("<Control-s>", lambda e: self._save_essay())
         
-    def _init_writer(self):
+    def _init_systems(self):
+        """Initialize both classic RAG and hybrid pipeline."""
         try:
             self.writer = RAGWriter()
+            self.pipeline = HybridPipeline()
         except Exception as e:
             messagebox.showerror("Initialization Error", str(e))
             self.destroy()
@@ -830,6 +796,10 @@ class RAGWriterGUI(ctk.CTk):
         self.current_provider = provider
         self.current_model = model
         print(f"Model: {provider}/{model}")
+        
+    def _on_mode_change(self, mode: str):
+        self.current_mode = mode
+        print(f"Mode: {mode}")
             
     def _create_left_panel(self):
         left_panel = ctk.CTkFrame(self, fg_color=COLORS["bg_secondary"], corner_radius=0)
@@ -846,12 +816,8 @@ class RAGWriterGUI(ctk.CTk):
         main_panel.grid_columnconfigure(0, weight=1)
         main_panel.grid_rowconfigure(3, weight=1)
         
-        # Title
-        title = ctk.CTkLabel(
-            main_panel, text="RAG Essay Writer",
-            font=ctk.CTkFont(family="Segoe UI", size=22, weight="bold"),
-            text_color=COLORS["text_primary"]
-        )
+        title = ctk.CTkLabel(main_panel, text="RAG Essay Writer",
+            font=ctk.CTkFont(family="Segoe UI", size=22, weight="bold"), text_color=COLORS["text_primary"])
         title.grid(row=0, column=0, padx=20, pady=(20, 12), sticky="w")
         
         # Input section
@@ -859,78 +825,53 @@ class RAGWriterGUI(ctk.CTk):
         input_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 12))
         input_frame.grid_columnconfigure(0, weight=1)
         
-        # Prompt
         lbl = ctk.CTkLabel(input_frame, text="Prompt", font=ctk.CTkFont(size=11, weight="bold"), text_color=COLORS["text_secondary"])
         lbl.grid(row=0, column=0, padx=12, pady=(12, 2), sticky="w")
         Tooltip(lbl, "The main topic or question for your essay")
         
-        self.prompt_entry = ctk.CTkTextbox(
-            input_frame, height=90, font=ctk.CTkFont(size=12),
+        self.prompt_entry = ctk.CTkTextbox(input_frame, height=90, font=ctk.CTkFont(size=12),
             fg_color=COLORS["bg_input"], text_color=COLORS["text_primary"],
-            border_width=1, border_color=COLORS["border"]
-        )
+            border_width=1, border_color=COLORS["border"])
         self.prompt_entry.grid(row=1, column=0, padx=12, pady=(0, 6), sticky="ew")
         
-        # Context
         lbl = ctk.CTkLabel(input_frame, text="Context", font=ctk.CTkFont(size=11), text_color=COLORS["text_muted"])
         lbl.grid(row=2, column=0, padx=12, pady=(6, 2), sticky="w")
-        Tooltip(lbl, "Optional background info: audience, purpose, constraints")
+        Tooltip(lbl, "Optional: audience, purpose, constraints")
         
-        self.context_entry = ctk.CTkTextbox(
-            input_frame, height=70, font=ctk.CTkFont(size=11),
+        self.context_entry = ctk.CTkTextbox(input_frame, height=70, font=ctk.CTkFont(size=11),
             fg_color=COLORS["bg_input"], text_color=COLORS["text_primary"],
-            border_width=1, border_color=COLORS["border"]
-        )
+            border_width=1, border_color=COLORS["border"])
         self.context_entry.grid(row=3, column=0, padx=12, pady=(0, 6), sticky="ew")
         
-        # Web search
         lbl = ctk.CTkLabel(input_frame, text="Web Search", font=ctk.CTkFont(size=11), text_color=COLORS["text_muted"])
         lbl.grid(row=4, column=0, padx=12, pady=(6, 2), sticky="w")
-        Tooltip(lbl, "Optional search query to fetch current information from the web")
+        Tooltip(lbl, "Optional search for current information")
         
-        self.search_entry = ctk.CTkEntry(
-            input_frame, font=ctk.CTkFont(size=11),
+        self.search_entry = ctk.CTkEntry(input_frame, font=ctk.CTkFont(size=11),
             fg_color=COLORS["bg_input"], text_color=COLORS["text_primary"],
             border_width=1, border_color=COLORS["border"],
-            placeholder_text="Optional search query", placeholder_text_color=COLORS["text_muted"]
-        )
+            placeholder_text="Optional search query", placeholder_text_color=COLORS["text_muted"])
         self.search_entry.grid(row=5, column=0, padx=12, pady=(0, 12), sticky="ew")
         
         # Action buttons
         btn_frame = ctk.CTkFrame(main_panel, fg_color="transparent")
         btn_frame.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 12))
         
-        self.generate_btn = ctk.CTkButton(
-            btn_frame, text="Generate", font=ctk.CTkFont(size=12, weight="bold"),
+        self.generate_btn = ctk.CTkButton(btn_frame, text="Generate", font=ctk.CTkFont(size=12, weight="bold"),
             fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
-            height=36, width=120, command=self._generate_essay
-        )
+            height=36, width=120, command=self._generate_essay)
         self.generate_btn.pack(side="left", padx=(0, 6))
-        Tooltip(self.generate_btn, "Generate a new essay (Ctrl+Enter)")
+        Tooltip(self.generate_btn, "Generate essay (Ctrl+Enter)")
         
-        self.regenerate_btn = ctk.CTkButton(
-            btn_frame, text="Regenerate", font=ctk.CTkFont(size=11),
+        self.regenerate_btn = ctk.CTkButton(btn_frame, text="Regenerate", font=ctk.CTkFont(size=11),
             fg_color=COLORS["bg_tertiary"], hover_color=COLORS["border"],
-            height=36, width=100, command=self._regenerate_essay
-        )
+            height=36, width=100, command=self._regenerate_essay)
         self.regenerate_btn.pack(side="left", padx=(0, 6))
-        Tooltip(self.regenerate_btn, "Regenerate with same settings")
         
-        self.refine_btn = ctk.CTkButton(
-            btn_frame, text="Refine", font=ctk.CTkFont(size=11),
+        self.save_btn = ctk.CTkButton(btn_frame, text="Save", font=ctk.CTkFont(size=11),
             fg_color=COLORS["bg_tertiary"], hover_color=COLORS["border"],
-            height=36, width=80, command=self._refine_essay
-        )
-        self.refine_btn.pack(side="left", padx=(0, 6))
-        Tooltip(self.refine_btn, "Critique and refine the last essay")
-        
-        self.save_btn = ctk.CTkButton(
-            btn_frame, text="Save", font=ctk.CTkFont(size=11),
-            fg_color=COLORS["bg_tertiary"], hover_color=COLORS["border"],
-            height=36, width=70, command=self._save_essay
-        )
+            height=36, width=70, command=self._save_essay)
         self.save_btn.pack(side="left")
-        Tooltip(self.save_btn, "Save essay to file (Ctrl+S)")
         
         self.word_count_label = ctk.CTkLabel(btn_frame, text="", font=ctk.CTkFont(size=10), text_color=COLORS["text_muted"])
         self.word_count_label.pack(side="right")
@@ -941,13 +882,12 @@ class RAGWriterGUI(ctk.CTk):
         output_frame.grid_columnconfigure(0, weight=1)
         output_frame.grid_rowconfigure(1, weight=1)
         
-        ctk.CTkLabel(output_frame, text="Output", font=ctk.CTkFont(size=11, weight="bold"), text_color=COLORS["text_secondary"]).grid(row=0, column=0, padx=12, pady=(12, 6), sticky="w")
+        ctk.CTkLabel(output_frame, text="Output", font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=COLORS["text_secondary"]).grid(row=0, column=0, padx=12, pady=(12, 6), sticky="w")
         
-        self.essay_output = ctk.CTkTextbox(
-            output_frame, font=ctk.CTkFont(family="Georgia", size=12),
+        self.essay_output = ctk.CTkTextbox(output_frame, font=ctk.CTkFont(family="Georgia", size=12),
             fg_color=COLORS["bg_input"], text_color=COLORS["text_primary"],
-            border_width=1, border_color=COLORS["border"], wrap="word"
-        )
+            border_width=1, border_color=COLORS["border"], wrap="word")
         self.essay_output.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 6))
         
         # Edit bar
@@ -955,45 +895,37 @@ class RAGWriterGUI(ctk.CTk):
         edit_frame.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 12))
         edit_frame.grid_columnconfigure(0, weight=1)
         
-        self.edit_entry = ctk.CTkEntry(
-            edit_frame, placeholder_text="Feedback to edit essay",
+        self.edit_entry = ctk.CTkEntry(edit_frame, placeholder_text="Feedback to edit essay",
             placeholder_text_color=COLORS["text_muted"], font=ctk.CTkFont(size=11),
             fg_color=COLORS["bg_input"], text_color=COLORS["text_primary"],
-            border_width=1, border_color=COLORS["border"]
-        )
+            border_width=1, border_color=COLORS["border"])
         self.edit_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         
-        edit_btn = ctk.CTkButton(
-            edit_frame, text="Edit", font=ctk.CTkFont(size=11),
-            fg_color=COLORS["bg_tertiary"], hover_color=COLORS["border"],
-            width=60, command=self._edit_essay
-        )
+        edit_btn = ctk.CTkButton(edit_frame, text="Edit", font=ctk.CTkFont(size=11),
+            fg_color=COLORS["bg_tertiary"], hover_color=COLORS["border"], width=60, command=self._edit_essay)
         edit_btn.grid(row=0, column=1)
-        Tooltip(edit_btn, "Revise essay based on your feedback")
         
     def _create_right_panel(self):
         right_panel = ctk.CTkFrame(self, fg_color=COLORS["bg_secondary"], corner_radius=0)
         right_panel.grid(row=0, column=2, sticky="nsew")
         right_panel.grid_columnconfigure(0, weight=1)
-        right_panel.grid_rowconfigure(0, weight=3)  # Settings gets more space
-        right_panel.grid_rowconfigure(1, weight=1)  # Console smaller
+        right_panel.grid_rowconfigure(0, weight=3)
+        right_panel.grid_rowconfigure(1, weight=1)
         
-        # Settings (scrollable)
-        self.settings_panel = SettingsPanel(right_panel, self.writer, on_model_change=self._on_model_change)
+        self.settings_panel = SettingsPanel(right_panel, self.writer, 
+            on_model_change=self._on_model_change, on_mode_change=self._on_mode_change)
         self.settings_panel.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         
-        # Console (double height)
         console_frame = ctk.CTkFrame(right_panel, fg_color=COLORS["bg_tertiary"], corner_radius=0)
         console_frame.grid(row=1, column=0, sticky="nsew")
         console_frame.grid_columnconfigure(0, weight=1)
         console_frame.grid_rowconfigure(1, weight=1)
         
-        ctk.CTkLabel(console_frame, text="Console", font=ctk.CTkFont(size=11, weight="bold"), text_color=COLORS["text_secondary"]).grid(row=0, column=0, padx=8, pady=(8, 4), sticky="w")
+        ctk.CTkLabel(console_frame, text="Console", font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=COLORS["text_secondary"]).grid(row=0, column=0, padx=8, pady=(8, 4), sticky="w")
         
-        self.console = ctk.CTkTextbox(
-            console_frame, font=ctk.CTkFont(family="Consolas", size=9),
-            fg_color=COLORS["bg_input"], text_color=COLORS["text_muted"], border_width=0
-        )
+        self.console = ctk.CTkTextbox(console_frame, font=ctk.CTkFont(family="Consolas", size=9),
+            fg_color=COLORS["bg_input"], text_color=COLORS["text_muted"], border_width=0)
         self.console.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 6))
         self.console.configure(state="disabled")
         
@@ -1006,23 +938,58 @@ class RAGWriterGUI(ctk.CTk):
             messagebox.showwarning("Missing Prompt", "Please enter a prompt.")
             return
             
-        context = self.context_entry.get("1.0", "end").strip() or None
+        context = self.context_entry.get("1.0", "end").strip() or ""
         search = self.search_entry.get().strip() or None
-        provider, model = self.settings_panel.get_current_model()
+        mode = self.settings_panel.get_mode()
         
         self.generate_btn.configure(state="disabled", text="...")
         self.essay_output.configure(state="normal")
         self.essay_output.delete("1.0", "end")
-        self.essay_output.insert("1.0", f"Generating with {provider}/{model}...")
+        self.essay_output.insert("1.0", f"Generating with {mode} mode...")
         self.essay_output.configure(state="disabled")
         
         def generate():
             try:
+                # Web search if requested
                 if search:
                     self.writer.web_search(search)
-                essay, style_sources, research_sources = self.writer.generate_essay(prompt, user_context=context)
+                
+                if mode == "Classic":
+                    # Classic RAG mode
+                    essay, style_sources, research_sources = self.writer.generate_essay(prompt, user_context=context)
+                else:
+                    # Hybrid pipeline mode
+                    # First retrieve passages using existing RAG
+                    if self.writer.use_mmr:
+                        results = self.writer.retrieve_mmr(prompt, top_k=self.writer.top_k)
+                    else:
+                        results = self.writer.retrieve(prompt, top_k=self.writer.top_k)
+                    
+                    passages = "\n\n---\n\n".join([r['text'] for r in results])
+                    
+                    # Configure pipeline
+                    config = self.settings_panel.get_pipeline_config()
+                    self.pipeline.config.skip_critique = config["skip_critique"]
+                    self.pipeline.config.writer_model = self.current_model
+                    
+                    # Run pipeline
+                    if mode == "Hybrid Quick":
+                        essay = self.pipeline.run_quick(prompt, passages, context)
+                    else:
+                        if config["dual_draft"]:
+                            essay = self.pipeline.run(prompt, passages, context)
+                        else:
+                            # Single draft variant
+                            essay = self.pipeline.run_quick(prompt, passages, context)
+                    
+                    style_sources = results
+                    research_sources = []
+                
                 self.after(0, lambda: self._display_essay(essay, style_sources, research_sources))
+                
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 self.after(0, lambda: messagebox.showerror("Error", str(e)))
             finally:
                 self.after(0, lambda: self.generate_btn.configure(state="normal", text="Generate"))
@@ -1033,17 +1000,14 @@ class RAGWriterGUI(ctk.CTk):
         if not self.writer.last_prompt:
             messagebox.showinfo("No Essay", "No previous essay.")
             return
-        self.generate_btn.configure(state="disabled", text="...")
-        
-        def regenerate():
-            try:
-                essay, style_sources, research_sources = self.writer.generate_essay(self.writer.last_prompt, user_context=self.writer.last_context)
-                self.after(0, lambda: self._display_essay(essay, style_sources, research_sources))
-            except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Error", str(e)))
-            finally:
-                self.after(0, lambda: self.generate_btn.configure(state="normal", text="Generate"))
-        threading.Thread(target=regenerate, daemon=True).start()
+            
+        # Re-run with same prompt
+        self.prompt_entry.delete("1.0", "end")
+        self.prompt_entry.insert("1.0", self.writer.last_prompt)
+        if self.writer.last_context:
+            self.context_entry.delete("1.0", "end")
+            self.context_entry.insert("1.0", self.writer.last_context)
+        self._generate_essay()
         
     def _edit_essay(self):
         if not self.writer.last_essay:
@@ -1053,10 +1017,12 @@ class RAGWriterGUI(ctk.CTk):
         if not feedback:
             messagebox.showwarning("Missing Feedback", "Enter feedback.")
             return
+            
         self.generate_btn.configure(state="disabled", text="...")
         
         def edit():
             try:
+                # Always use classic mode for edits
                 essay, style_sources, research_sources = self.writer.generate_essay(
                     self.writer.last_prompt, revision_feedback=feedback,
                     previous_essay=self.writer.last_essay, user_context=self.writer.last_context
@@ -1068,28 +1034,6 @@ class RAGWriterGUI(ctk.CTk):
             finally:
                 self.after(0, lambda: self.generate_btn.configure(state="normal", text="Generate"))
         threading.Thread(target=edit, daemon=True).start()
-        
-    def _refine_essay(self):
-        if not self.writer.last_essay:
-            messagebox.showinfo("No Essay", "No essay to refine.")
-            return
-        self.refine_btn.configure(state="disabled", text="...")
-        
-        def refine():
-            try:
-                if self.writer.use_mmr:
-                    style_results = self.writer.retrieve_mmr_by_type(self.writer.last_prompt, 'style', top_k=self.writer.top_k)
-                else:
-                    style_results = self.writer.retrieve_by_type(self.writer.last_prompt, 'style', top_k=self.writer.top_k)
-                style_context = "\n\n".join([r['text'] for r in style_results])
-                refined = self.writer.refine_essay(self.writer.last_essay, self.writer.last_prompt, style_context)
-                self.writer.last_essay = refined
-                self.after(0, lambda: self._display_essay(refined, self.writer.last_sources, self.writer.last_research_sources))
-            except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Error", str(e)))
-            finally:
-                self.after(0, lambda: self.refine_btn.configure(state="normal", text="Refine"))
-        threading.Thread(target=refine, daemon=True).start()
         
     def _display_essay(self, essay: str, style_sources: list, research_sources: list):
         self.essay_output.configure(state="normal")
@@ -1106,6 +1050,8 @@ class RAGWriterGUI(ctk.CTk):
         
         prompt = self.prompt_entry.get("1.0", "end").strip()
         self.writer.last_prompt = prompt
+        self.writer.last_context = self.context_entry.get("1.0", "end").strip()
+        
         self.writer.essay_history.append({
             'prompt': prompt, 'essay': essay, 'style_sources': style_sources,
             'research_sources': research_sources, 'type': 'new',
